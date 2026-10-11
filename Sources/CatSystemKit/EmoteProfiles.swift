@@ -61,6 +61,23 @@ public final class EmoteProfiles {
         public var blinks: [Blink] = []
         public var lips: [Lip] = []
         public var chains: [Int: Chain] = [:]
+        /// `#material`: the inertia variables (hair, bust, `quake`) as springs.
+        public var materials: [String: Material] = [:]
+        /// `#inertia_lr` / `#inertia_ud`: variables that lag when the character moves.
+        public var inertiaLR: [String] = []
+        public var inertiaUD: [String] = []
+        /// `#inertia_dif`: a pose variable's change pushes another (`head_LR` swings the
+        /// hair), by `power`, up to `limit`.
+        public var inertiaFromChange: [(source: String, target: String, power: Double, limit: Double)] = []
+    }
+
+    /// `#material`: mass, spring, resistance, time step (a frame's share of the spring's
+    /// time), largest displacement, inverted, and the scale of a move in pixels.
+    public struct Material: Sendable {
+        public var mass = 1.0, spring = 1.0, resistance = 1.0, step = 0.1
+        public var limit = 50.0
+        public var inverted = false
+        public var scale = 30.0
     }
 
     public struct Profile {
@@ -260,6 +277,18 @@ public final class EmoteProfiles {
             }
         }
         for (d, name) in tableDigits { if let t = tables[name] { e.chains[d] = t } }
+        // Inertia.
+        for (name, rest) in s["material"] ?? [] {
+            let n = rest.compactMap(Double.init)
+            guard n.count >= 5 else { continue }
+            e.materials[name] = Material(mass: max(0.01, n[0]), spring: n[1], resistance: n[2], step: n[3], limit: n[4],
+                                         inverted: n.count > 5 && n[5] != 0, scale: n.count > 6 ? max(1, n[6]) : 30)
+        }
+        e.inertiaLR += (s["inertia_lr"] ?? []).map(\.0)
+        e.inertiaUD += (s["inertia_ud"] ?? []).map(\.0)
+        for (source, rest) in s["inertia_dif"] ?? [] where rest.count >= 3 {
+            if let power = Double(rest[1]), let limit = Double(rest[2]) { e.inertiaFromChange.append((source, rest[0], power, limit)) }
+        }
     }
 
     /// The pose for `spec` (`ca01,1,1,b,3,0,4,0:0`) and `m2body` digits (`1,2,1,1,1,1`; `@`

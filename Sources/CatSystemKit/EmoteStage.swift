@@ -23,6 +23,8 @@ public final class EmoteStage {
     public static let framesPerSecond = 60.0
     /// The screen the scene coordinates are for.
     public var width = 1280.0, height = 720.0
+    /// Hair and bust physics (on).
+    public var physicsEnabled = true
 
     public init(cast: EmoteCast) {
         self.cast = cast
@@ -103,6 +105,55 @@ public final class EmoteStage {
         /// `m2prmscale`: percent of the named variables' pose values.
         var parameterScales: [String: Double] = [:]
         var arc: (start: Double, frames: Double, from: Double, to: Double, x: Double, y: Double)?
+        /// Inertia variables: displacement and velocity.
+        var springs: [String: (x: Double, v: Double)] = [:]
+        /// What moved them last frame: the pose variables and the position.
+        var lastSources: [String: Double] = [:]
+        var lastFrame: Double?
+    }
+
+    // MARK: Inertia
+
+    /// Hair, bust and `quake` variables as the game's `#material` springs: each lags behind
+    /// a move of the character (`#inertia_lr` / `#inertia_ud`, by the pixels moved over the
+    /// material's scale) and a change of the pose variables `#inertia_dif` names (a head
+    /// turn swings the hair, the idle loop's breathing bobs it), then springs back. Each
+    /// frame moves the spring on by the material's time step.
+    private func inertia(_ a: Actor, pose: EmoteProfiles.Pose, variables v: inout [String: Double], x: Double, y: Double, frame: Double) {
+        let face = pose.face
+        guard !face.materials.isEmpty else { return }
+        let frames = min(4, max(0, frame - (a.lastFrame ?? frame)))
+        a.lastFrame = frame
+        var sources = ["@x": x, "@y": y]
+        for (source, _, _, _) in face.inertiaFromChange { sources[source] = v[source] ?? 0 }
+        var kicks: [String: Double] = [:]
+        if !a.lastSources.isEmpty {
+            let dx = x - (a.lastSources["@x"] ?? x), dy = y - (a.lastSources["@y"] ?? y)
+            for name in face.inertiaLR { kicks[name, default: 0] -= dx / (face.materials[name]?.scale ?? 30) }
+            for name in face.inertiaUD { kicks[name, default: 0] -= dy / (face.materials[name]?.scale ?? 30) }
+            for (source, target, power, _) in face.inertiaFromChange {
+                kicks[target, default: 0] -= ((sources[source] ?? 0) - (a.lastSources[source] ?? 0)) * power
+            }
+        }
+        a.lastSources = sources
+        var limits: [String: Double] = [:]
+        for (_, target, _, limit) in face.inertiaFromChange { limits[target] = max(limits[target] ?? 0, limit) }
+        for (name, m) in face.materials {
+            var s = a.springs[name] ?? (0, 0)
+            s.x += (kicks[name] ?? 0) * (m.inverted ? -1 : 1)
+            // Integrated in small steps for stability: a = (−k·x − c·v) / m.
+            let steps = max(1, Int((frames * 4).rounded(.up)))
+            let h = frames * m.step / Double(steps)
+            for _ in 0..<steps where h > 0 {
+                let accel = (-m.spring * s.x - m.resistance * s.v) / m.mass
+                s.v += accel * h
+                s.x += s.v * h
+            }
+            s.x = min(m.limit, max(-m.limit, s.x))
+            a.springs[name] = s
+            let limit = limits[name] ?? 30
+            v[name] = (v[name] ?? 0) + min(limit, max(-limit, s.x))
+        }
     }
 
     private var actors: [Int: Actor] = [:]
@@ -162,7 +213,8 @@ public final class EmoteStage {
     /// after it).
     public func command(_ text: String, cast: [Int: ScenePlayer.Character], time: Double) {
         let words = text.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard words.first == "mpl" else { return }
+        // `fmpl` (faces in the message window) works the same, in a stage of its own.
+        guard words.first == "mpl" || words.first == "fmpl" else { return }
         let frame = time * Self.framesPerSecond
         guard words.count >= 2 else { actors = [:]; return }
         let banks = ScenePlayer.planeNumbers(words[1])
@@ -276,6 +328,11 @@ public final class EmoteStage {
         public let scaleX: Double, scaleY: Double
         public let alpha: Double
         public let model: String
+
+        /// The same drawing at another opacity.
+        public func fading(_ alpha: Double) -> Drawing {
+            Drawing(bank: bank, renderer: renderer, variables: variables, x: x, y: y, scaleX: scaleX, scaleY: scaleY, alpha: alpha, model: model)
+        }
     }
 
     /// The characters at `time`, by bank (those still loading are left out).
@@ -325,8 +382,6 @@ public final class EmoteStage {
                     v[lip.variable] = value
                 }
             }
-            renderer.model.applySelectors(&v)
-
             var x = a.x.value(at: frame), y = a.y.value(at: frame)
             if let arc = a.arc {
                 let t = (frame - arc.start) / max(1, arc.frames)
@@ -338,6 +393,8 @@ public final class EmoteStage {
                     y -= arc.y * s
                 }
             }
+            if physicsEnabled { inertia(a, pose: pose, variables: &v, x: x, y: y, frame: frame) }
+            renderer.model.applySelectors(&v)
             let mx = a.scaleX.value(at: frame) / 100, my = a.scaleY.value(at: frame) / 100
             out.append(Drawing(bank: n, renderer: renderer, variables: v,
                                x: x + pose.positionX + width / 2 + pose.scaleOffsetX * (1 - mx),

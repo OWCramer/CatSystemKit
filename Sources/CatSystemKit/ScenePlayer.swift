@@ -76,6 +76,8 @@ public final class ScenePlayer {
     public private(set) var planes: [Int: Plane] = [:]
     /// E-mote characters by bank.
     public private(set) var cast: [Int: Character] = [:]
+    /// Faces in the message window (`fmpl` bank N: the character's small model).
+    public private(set) var faces: [Int: Character] = [:]
     /// The characters' model arguments by bank (`ca01,1,1,b,3,0,4`).
     public var characters: [Int: String] { cast.compactMapValues(\.model) }
     public private(set) var bgm: String?
@@ -131,6 +133,7 @@ public final class ScenePlayer {
         public var characterX: [Int: Int]
         /// The characters in full (saves before E-mote drawing have only the two above).
         public var cast: [Int: Character]?
+        public var faces: [Int: Character]?
         public var bgm: String?
         public var variables: [Int: Int]
     }
@@ -138,7 +141,7 @@ public final class ScenePlayer {
     public func snapshot() -> Snapshot {
         Snapshot(stack: frames.map { .init(scene: $0.name, line: $0.line, messageIndex: $0.messageIndex) },
                  planes: planes, characters: characters, characterX: cast.compactMapValues(\.x), cast: cast,
-                 bgm: bgm, variables: variables)
+                 faces: faces, bgm: bgm, variables: variables)
     }
 
     /// Picks the story up where `snapshot` was taken.
@@ -166,6 +169,7 @@ public final class ScenePlayer {
             cast = snapshot.characters.mapValues { Character(model: $0) }
             for (n, x) in snapshot.characterX { cast[n, default: Character()].x = x }
         }
+        faces = snapshot.faces ?? [:]
         bgm = snapshot.bgm
         sounds = [:]
         voice = nil
@@ -459,9 +463,16 @@ public final class ScenePlayer {
     /// `mpl N pos x y`, `amove1|2|3`/`move frames x y` (their end point), `fade frames from
     /// to`, `blend a`, `disp 0|1`, `scale x% y%`, `ascale1 frames x% y%`, `m2body d,d,…`.
     /// Motions over time (`arc`, `shake`, `quake`), touch, lip and physics settings are
-    /// recorded only. `fmpl` is the face beside the message window, not drawn yet.
+    /// recorded only. `fmpl` does the same for the faces in the message window (`faces`).
     private func characterCommand(_ verb: String, _ args: [String]) {
-        guard verb == "mpl" else { return }
+        if verb == "fmpl" {
+            characterCommand(args, &faces)
+        } else {
+            characterCommand(args, &cast)
+        }
+    }
+
+    private func characterCommand(_ args: [String], _ cast: inout [Int: Character]) {
         guard let first = args.first else {
             cast = [:]
             return

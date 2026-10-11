@@ -23,6 +23,9 @@ import UniformTypeIdentifiers
 ///   cs2-cli play <base folder> [--lines N] [--from SCENE] [--text]   the story, headless
 ///   cs2-cli snapshot <base folder> <out.png> [--lines N] [--from SCENE] [--save save.json]  the screen after N lines
 ///   cs2-cli emote <base folder> <ca01,1,1,b,3,0,4> <out.png> [m2body] [scale]  one E-mote character
+///   cs2-cli emotecompare <base> <spec> [m2body] [scale] [out prefix]  the CPU and Metal drawings compared
+///   cs2-cli emoteinfo <base> <model>               a model's variables, timelines and metadata
+///   cs2-cli animate <base> <out dir> --from SCENE [--lines N] [--seconds S] [--fps F] [--metal]  characters over time
 /// Options: --key <passphrase> or --namekey <0xHEX> instead of recovering the name key.
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -592,8 +595,9 @@ case "animate":
         blend(above, w: 1280, h: 720, x: 0, y: 0, alpha: 255)
         writePNG(canvas, width: 1280, height: 720, to: out.appendingPathComponent(String(format: "%04d.png", f)))
         print(String(format: "%5.2f s", t - clock), drawings.map { d in
-            String(format: "%d:%@ x %.0f y %.0f a %.2f body_UD %.1f eye %.1f talk %.2f", d.bank, d.model, d.x, d.y, d.alpha,
-                   d.variables["body_UD"] ?? 0, d.variables["face_eye_open"] ?? 0, d.variables["face_talk"] ?? 0)
+            String(format: "%d:%@ x %.0f y %.0f a %.2f body_UD %.1f eye %.1f talk %.2f hair_UD_front %.2f bust_LR %.2f", d.bank, d.model, d.x, d.y, d.alpha,
+                   d.variables["body_UD"] ?? 0, d.variables["face_eye_open"] ?? 0, d.variables["face_talk"] ?? 0,
+                   d.variables["hair_UD_front"] ?? 0, d.variables["bust_LR"] ?? 0)
         }.joined(separator: " | "))
     }
     if !gpuTimes.isEmpty {
@@ -674,6 +678,12 @@ case "emoteinfo":
         for t in psb.root["metadata"]?["timelineControl"]?.list ?? [] where t["label"]?.string == label {
             print(t)
         }
+    }
+    if let psb = try? PSBFile(psz: file(g, rest[1] + ".psz")) {
+        if ProcessInfo.processInfo.environment["CS2_CONTROLS"] != nil {
+            for key in ["hairControl", "bustControl", "partsControl", "eyeControl"] { print(key, psb.root["metadata"]?[key] ?? .null) }
+        }
+        print("metadata: " + (psb.root["metadata"]?.dictionary?.map { k, v in "\(k)\(v.list.map { "[\($0.count)]" } ?? "")" }.sorted().joined(separator: " ") ?? "none"))
     }
     print("base \(m.baseObject)/\(m.baseMotion); \(m.objects.count) objects, \(m.objects.values.reduce(0) { $0 + $1.count }) motions")
     var ranges: [String: (Double, Double, Bool)] = [:]

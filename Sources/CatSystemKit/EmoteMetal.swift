@@ -66,6 +66,27 @@ public final class EmoteGPU: @unchecked Sendable {
 
     // MARK: Textures
 
+    private var uploading: Set<ObjectIdentifier> = []
+
+    /// Whether the model's textures are on the GPU; if not, they are uploaded in the
+    /// background (so a frame never waits for a large atlas).
+    public func texturesReady(for model: EmoteModel) -> Bool {
+        let key = ObjectIdentifier(model)
+        lock.lock()
+        let ready = textures[key] != nil
+        let start = !ready && !uploading.contains(key)
+        if start { uploading.insert(key) }
+        lock.unlock()
+        if start {
+            nonisolated(unsafe) let model = model
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                _ = self.textures(for: model)
+                self.lock.withLock { _ = self.uploading.remove(key) }
+            }
+        }
+        return ready
+    }
+
     /// The model's textures on the GPU (uploaded on first use; the last few models kept).
     public func textures(for model: EmoteModel) -> [MTLTexture]? {
         let key = ObjectIdentifier(model)

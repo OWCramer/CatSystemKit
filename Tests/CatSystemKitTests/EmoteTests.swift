@@ -104,6 +104,15 @@ import Testing
     #expect(a.transitions(from: b)["face_eye_open"]?.curve == "fix")
 }
 
+@Test func tweensSlideFromWhereTheyAre() {
+    var x = EmoteStage.Tween(1080)
+    x.move(to: 780, frames: 70, curve: .easeOut, at: 0)
+    #expect(x.value(at: 0) == 1080 && x.value(at: 70) == 780)
+    #expect(x.value(at: 35) < 930) // easing out: past halfway at half time
+    x.move(to: 900, frames: 10, curve: .linear, at: 35)
+    #expect(abs(x.value(at: 35) - x.from) < 1e-9 && x.value(at: 45) == 900)
+}
+
 @Test func levelFilesAreFloatsPerFrame() {
     let bytes = [Float(0.5), 4.25].flatMap { v in withUnsafeBytes(of: v.bitPattern.littleEndian) { Array($0) } }
     #expect(EmoteStage.levels(bytes) == [0.5, 4.25])
