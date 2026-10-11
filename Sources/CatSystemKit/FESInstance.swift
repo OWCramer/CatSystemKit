@@ -164,6 +164,18 @@ final class FESInstance: FESContext {
 
     func hasBlock(_ name: String) -> Bool { program.blocks[name] != nil }
 
+    /// The objects `#OBJECT KEYBLOCK` puts in the screen's key navigation, by name (every
+    /// element of an array named there: the save screen's table leaves two slots out).
+    lazy var keyNames: Set<String> = {
+        var names: Set<String> = []
+        for table in program.tables where table.columns == ["KEYBLOCK"] {
+            for (target, _) in table.rows {
+                names.insert(target.firstIndex(of: "[").map { String(target[..<$0]) } ?? target)
+            }
+        }
+        return names
+    }()
+
     init(name: String, program: FESProgram, player: FESPlayer, parent: FESInstance?) {
         self.name = name
         self.program = program
@@ -901,7 +913,12 @@ final class FESInstance: FESContext {
                 if let n = Int(params[i]) { setGlobal(n, v ?? 0) }
             }
         // The backlog (`LOGSTRING8`).
-        case "setlog", "remake", "userfontobj", "userfont", "attach", "pathinfo":
+        case "pathinfo":
+            // `log pathinfo line a b`: where backlog line `line` is in the story, for the jump
+            // back (`exit -2`); the host keeps the place by the line's number, so `$a` gets it.
+            if params.count >= 2, let n = Int(params[1]) { setGlobal(n, p(0)) }
+            if params.count >= 3, let n = Int(params[2]) { setGlobal(n, 0) }
+        case "setlog", "remake", "userfontobj", "userfont", "attach":
             if sub == "setlog" || sub == "remake" {
                 o.top = max(0, (player.host?.fesLog.count ?? 0) - o.count)
                 o.revision += 1

@@ -33,6 +33,9 @@ public final class ScenePlayer {
         public let voice: String?
         /// The speaker as the scene has it (Japanese), as `nametable.csv` names speakers.
         public var originalSpeaker: String? = nil
+        /// The text ended with `\@`: it shows now and the scene goes on (voices, motions,
+        /// expressions while it is read) until the click wait, an `.input` event.
+        public var continues = false
     }
 
     public enum Event: Sendable {
@@ -42,6 +45,9 @@ public final class ScenePlayer {
         /// A scene the story asked for isn't in the game (the Steam release leaves out the
         /// adult scenes the PC version adds as a patch).
         case missingScene(String)
+        /// The click wait after a message that `continues` (`\@`): the story waits for a
+        /// click here, with that message still shown.
+        case input
         case end(String)
     }
 
@@ -120,7 +126,11 @@ public final class ScenePlayer {
     private var text = ""
     private var inMessage = false
     private var pendingVoice: String?
+    /// A message that `continues` was shown; its click wait is the next input line.
+    private var awaitingInput = false
     private lazy var expressions = Context(player: self)
+    /// The E-mote profiles and models, for `mpl N m2att` (where a character's head is).
+    public var emote: EmoteCast?
 
     public convenience init(game: CatSystemGame, variables: [Int: Int] = [:]) {
         self.init(variables: variables, files: { try game.file(named: $0) })
@@ -134,6 +144,7 @@ public final class ScenePlayer {
     public func start(_ scene: String) throws {
         frames = []
         finished = false
+        awaitingInput = false
         try enter(scene)
     }
 
@@ -156,12 +167,15 @@ public final class ScenePlayer {
         public var faces: [Int: Character]?
         public var bgm: String?
         public var variables: [Int: Int]
+        /// Taken while a message that `continues` was shown, before its click wait (nil in
+        /// older saves, which were all taken at the click wait).
+        public var beforeInput: Bool?
     }
 
     public func snapshot() -> Snapshot {
         Snapshot(stack: frames.map { .init(scene: $0.name, line: $0.line, messageIndex: $0.messageIndex) },
                  planes: planes, characters: characters, characterX: cast.compactMapValues(\.x), cast: cast,
-                 faces: faces, bgm: bgm, variables: variables)
+                 faces: faces, bgm: bgm, variables: variables, beforeInput: awaitingInput)
     }
 
     /// Picks the story up where `snapshot` was taken.
@@ -173,6 +187,7 @@ public final class ScenePlayer {
         inMessage = false
         pendingVoice = nil
         finished = false
+        awaitingInput = snapshot.beforeInput ?? false
         for position in snapshot.stack {
             guard let bytes = try files(position.scene + ".cst") else {
                 throw CatSystemGame.Failure.notCatSystem(URL(fileURLWithPath: position.scene + ".cst"))
@@ -247,9 +262,23 @@ public final class ScenePlayer {
         case .message:
             inMessage = true
             text += line.text
+            // `「…」\@`: the line shows now; the commands after it run while it is read.
+            if line.text.hasSuffix("\\@") {
+                closeMessage(&frame)
+                awaitingInput = true
+            }
             frames.append(frame)
         case .input, .page:
-            closeMessage(&frame)
+            if awaitingInput, Self.clean(text).isEmpty {
+                // The click wait of the message already shown (the scene's empty text line
+                // before it is `\n`).
+                awaitingInput = false
+                speaker = nil; text = ""; inMessage = false
+                pending.append(.input)
+            } else {
+                awaitingInput = false
+                closeMessage(&frame)
+            }
             frames.append(frame)
         case .command:
             frames.append(frame)
@@ -269,7 +298,7 @@ public final class ScenePlayer {
         let message = Message(scene: frame.name, index: frame.messageIndex,
                               speaker: (name?.isEmpty ?? true) ? nil : name,
                               text: Self.clean(translated?.text ?? text), original: text, voice: pendingVoice,
-                              originalSpeaker: speaker)
+                              originalSpeaker: speaker, continues: text.hasSuffix("\\@"))
         frame.messageIndex += 1
         pendingVoice = nil
         pending.append(.message(message))
@@ -300,8 +329,14 @@ public final class ScenePlayer {
             line = String(line[line.index(after: close)...]).trimmingCharacters(in: .whitespaces)
         }
         if line.hasPrefix("#") { assign(line); return }
-        let words = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        var words = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
         guard let verb = words.first else { return }
+        // Numbers given as variables (`mpl #210 m2att …`, `particle3 0 em_note … #205+#218+#196 …`)
+        // are worked out here, so the command as reported has plain numbers.
+        if ["mpl", "fmpl", "particle", "particle2", "particle3"].contains(verb), words.dropFirst().contains(where: { $0.contains("#") }) {
+            for i in words.indices.dropFirst() where words[i].contains("#") { words[i] = String(evaluate(words[i])) }
+            line = words.joined(separator: " ")
+        }
         let args = Array(words.dropFirst())
         switch verb {
         case "next":
@@ -325,6 +360,8 @@ public final class ScenePlayer {
             planeCommand(verb, args)
         case "pl":
             planeProperty(args)
+        case "mpl" where args.count >= 6 && args[1] == "m2att":
+            attribute(args)
         case "mpl", "fmpl":
             characterCommand(verb, args)
         case "bgm":
@@ -342,6 +379,20 @@ public final class ScenePlayer {
             break
         }
         pending.append(.command(line))
+    }
+
+    /// `mpl N m2att att pos xVar yVar exVar`: where the character in bank N has its
+    /// attribute `att` (the `.dif`'s `#attribute`: by the head), into `#xVar`/`#yVar` in
+    /// screen pixels, and the attribute's extra value (the model's size, 1–4) into `#exVar`.
+    /// The scenes put emotion marks (`particle3 … em_note`) there.
+    private func attribute(_ args: [String]) {
+        guard let bank = Int(args[0]), let number = Int(args[2]), let xVar = Int(args[4]), let yVar = Int(args[5]) else { return }
+        let exVar = args.count > 6 ? Int(args[6]) : nil
+        guard let c = cast[bank], c.model != nil else { return }
+        let found = emote?.attribute(c, number: number)
+        variables[xVar] = Int((found?.x ?? Double(c.x ?? 640)).rounded())
+        variables[yVar] = Int((found?.y ?? Double((c.y ?? 360) - 170)).rounded())
+        if let exVar { variables[exVar] = found?.extra ?? 3 }
     }
 
     private func assign(_ line: String) {

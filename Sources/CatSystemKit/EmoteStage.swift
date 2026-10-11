@@ -13,7 +13,13 @@ import Foundation
 ///   timeline).
 /// - Blinking: the `#blink` entry for the eyes shown, every `minWait`…`maxWait` frames.
 /// - Lip sync: while a voice plays (`A_01_001`: `a` is character `ca…`), the level from its
-///   `.lv` file (one float per 1/60 s) picks the mouth's `face_talk` from `#lip_table`.
+///   `.lv` file (one float per 1/60 s) picks the mouth's `face_talk` from `#lip_table`. A
+///   voice without one (Cinnamon's in scene 12, the touch voices) runs the mouth through
+///   `#lip_flow` while the voice is loud enough (its own level, measured as it decodes),
+///   stopping at the flow's marked steps once it falls quiet.
+/// - Inertia: `m2iner pause [variable]` holds the named springs (or all) still through the
+///   moves that follow (a camera pan carrying the character), until its next pose change
+///   once it stands still.
 /// - Motions: `amove1/2/3` and `move` slide to their end point over their frames (easing
 ///   out, in, both, or linear), `fade` and `ascale` likewise, `arc` hops.
 ///
@@ -116,6 +122,10 @@ public final class EmoteStage {
         /// What moved them last frame: the pose variables and the position.
         var lastSources: [String: Double] = [:]
         var lastFrame: Double?
+        /// `m2iner pause`: springs held (`*` all of them).
+        var pausedSprings: Set<String> = []
+        /// `#lip_flow` under way: the step and the frame it began.
+        var flow: (step: Int, start: Double)?
     }
 
     // MARK: Inertia
@@ -147,7 +157,8 @@ public final class EmoteStage {
         for (name, m) in face.materials {
             var s = a.springs[name] ?? (0, 0)
             let bust = name.lowercased().contains("bust") ? bustInertia : 1
-            s.x += (kicks[name] ?? 0) * (m.inverted ? -1 : 1) * bust
+            let held = a.pausedSprings.contains("*") || a.pausedSprings.contains(name)
+            s.x += held ? 0 : (kicks[name] ?? 0) * (m.inverted ? -1 : 1) * bust
             // Integrated in small steps for stability: a = (−k·x − c·v) / m.
             let steps = max(1, Int((frames * 4).rounded(.up)))
             let h = frames * m.step / Double(steps)
@@ -171,20 +182,67 @@ public final class EmoteStage {
     private var voiceName: String?
     private var voiceLevels: [Float] = []
     private var voiceStart = 0.0
+    /// The voice's own loudness (RMS, one per 1/60 s), for `#lip_flow`.
+    private var voiceEnvelope: [Float] = []
+    /// How loud (RMS of samples in -1…1) a voice must be for the flow to run.
+    public static let flowThreshold: Float = 0.02
 
     /// The voice playing (`A_01_001`) and when it began, or nil. Its `.lv` levels are read
-    /// once per voice.
-    public func setVoice(_ name: String?, startedAt start: Double) {
+    /// once per voice; `envelope` is its loudness per 1/60 s (for voices without them).
+    public func setVoice(_ name: String?, startedAt start: Double, envelope: [Float] = []) {
         guard let name else {
             voiceName = nil
             voiceLevels = []
+            voiceEnvelope = []
             return
         }
         if name.lowercased() != voiceName?.lowercased() {
             voiceName = name
             voiceLevels = cast.files(name.lowercased() + ".lv").map(Self.levels) ?? []
         }
+        voiceEnvelope = envelope
         voiceStart = start
+    }
+
+    /// Loudness per 1/60 s (RMS) of mono or interleaved samples at `rate` a second.
+    public static func envelope(_ samples: UnsafeBufferPointer<Float>, rate: Double) -> [Float] {
+        let step = max(1, Int(rate / framesPerSecond))
+        var out: [Float] = []
+        out.reserveCapacity(samples.count / step + 1)
+        var i = 0
+        while i < samples.count {
+            let end = min(samples.count, i + step)
+            var sum: Float = 0
+            for j in i..<end { sum += samples[j] * samples[j] }
+            out.append((sum / Float(end - i)).squareRoot())
+            i = end
+        }
+        return out
+    }
+
+    /// The `#lip_flow` value for a mouth at `frame` of the voice, or nil while it rests.
+    private func flowValue(_ a: Actor, _ flow: [(value: Double, frames: Double, mayStop: Bool)], voiceFrame: Double, frame: Double) -> Double? {
+        let i = Int(voiceFrame)
+        let sounding = voiceEnvelope.isEmpty ? true : (i >= 0 && i < voiceEnvelope.count && voiceEnvelope[i] >= Self.flowThreshold)
+        guard var state = a.flow else {
+            guard sounding else { return nil }
+            a.flow = (0, frame)
+            return flow[0].value
+        }
+        var steps = 0
+        while frame >= state.start + flow[state.step].frames, steps < 64 {
+            steps += 1
+            if flow[state.step].mayStop, !sounding {
+                a.flow = nil
+                return nil
+            }
+            state.start += flow[state.step].frames
+            state.step = (state.step + 1) % flow.count
+        }
+        // Far behind (a pause): start again from here.
+        if frame - state.start > 120 { state = (state.step, frame) }
+        a.flow = state
+        return flow[state.step].value
     }
 
     /// `.lv` files: little-endian 32-bit floats, one per 1/60 s of the voice.
@@ -284,6 +342,12 @@ public final class EmoteStage {
                     if verb == "m2fspeed" { a.speeds[name] = percent } else { a.parameterScales[name] = percent }
                 }
                 if verb == "m2prmscale" { setPose(a, c, frame: frame, animate: true, force: true) }
+            case "m2iner":
+                // `m2iner pause [variable …]`: those springs (all without names) stay still.
+                if args.count >= 2, args[1] == "pause" {
+                    let names = args.dropFirst(2)
+                    if names.isEmpty { a.pausedSprings.insert("*") } else { a.pausedSprings.formUnion(names) }
+                }
             case "m2enable_lip":
                 a.lipEnabled = (number(1) ?? 1) != 0
             case "m2enable_blink":
@@ -302,6 +366,8 @@ public final class EmoteStage {
         guard let pose = cast.pose(spec, body: c.body) else { return }
         let old = a.pose
         let sameModel = old?.model == pose.model
+        // Held springs move again with the next pose once the character stands still.
+        if !a.pausedSprings.isEmpty, !sameModel || (a.x.done(at: frame) && a.y.done(at: frame)) { a.pausedSprings = [] }
         a.spec = spec
         a.body = c.body
         a.pose = pose
@@ -392,6 +458,12 @@ public final class EmoteStage {
                 a.blinkStart = nil
             }
             // Lip sync.
+            let speaking = a.lipEnabled && speaker.map { pose.model.lowercased().hasPrefix($0) } == true && voiceFrame >= 0
+            if speaking, voiceLevels.isEmpty, let lip = pose.lip, !lip.flow.isEmpty {
+                if let value = flowValue(a, lip.flow, voiceFrame: voiceFrame, frame: frame) { v[lip.variable] = value }
+            } else {
+                a.flow = nil
+            }
             if a.lipEnabled, let lip = pose.lip, let speaker, pose.model.lowercased().hasPrefix(speaker),
                voiceFrame >= 0, Int(voiceFrame) < voiceLevels.count {
                 let level = Double(voiceLevels[Int(voiceFrame)]) * 100
@@ -435,6 +507,14 @@ public final class EmoteStage {
                                alpha: alpha / 255, model: pose.model))
         }
         return out
+    }
+
+    /// Where the character in a bank stands at `time` (scene coordinates: its `pos`, slides
+    /// under way), or nil when there is none.
+    public func place(bank: Int, at time: Double) -> (x: Double, y: Double)? {
+        guard let a = actors[bank] else { return nil }
+        let frame = time * Self.framesPerSecond
+        return (a.x.value(at: frame), a.y.value(at: frame))
     }
 
     /// Whether anything is moving at `time` besides the idle loops and blinks (a slide, fade,

@@ -40,6 +40,9 @@ public final class EmoteProfiles {
         public var low: Double, high: Double
         public var levels: [Double]
         public var variable: String
+        /// `#lip_flow`: for a voice without levels (no `.lv` beside it), the mouth runs through
+        /// these (lip variable value, frames, whether it may stop here once the voice is quiet).
+        public var flow: [(value: Double, frames: Double, mayStop: Bool)] = []
     }
 
     /// `#chain`: how a digit's variables move when its code changes: `fix` (at once),
@@ -69,6 +72,9 @@ public final class EmoteProfiles {
         /// `#inertia_dif`: a pose variable's change pushes another (`head_LR` swings the
         /// hair), by `power`, up to `limit`.
         public var inertiaFromChange: [(source: String, target: String, power: Double, limit: Double)] = []
+        /// `#attribute`: number → an offset from the head and an extra value (the model's
+        /// size, 1–4), for `mpl N m2att`.
+        public var attributes: [Int: (x: Double, y: Double, extra: Int)] = [:]
     }
 
     /// `#material`: mass, spring, resistance, time step (a frame's share of the spring's
@@ -251,6 +257,21 @@ public final class EmoteProfiles {
             let code = rest[0].lowercased()
             e.lips.append(Lip(digit: d, code: code, low: low, high: high, levels: rest.dropFirst(4).compactMap(Double.init),
                               variable: lipVariables[first + ":" + code] ?? "face_talk"))
+        }
+        // `#lip_flow`: digit code `value,frames,check` steps.
+        for (first, rest) in s["lip_flow"] ?? [] {
+            guard let d = Int(first), rest.count >= 2 else { continue }
+            let code = rest[0].lowercased()
+            let steps = rest.dropFirst().compactMap { step -> (value: Double, frames: Double, mayStop: Bool)? in
+                let n = step.split(separator: ",").compactMap { Double($0) }
+                return n.count >= 2 ? (n[0], max(1, n[1]), n.count > 2 && n[2] != 0) : nil
+            }
+            if let i = e.lips.firstIndex(where: { $0.digit == d && $0.code == code }) { e.lips[i].flow = steps }
+        }
+        // `#attribute`: number x y extra.
+        for (first, rest) in s["attribute"] ?? [] {
+            guard let n = Int(first), rest.count >= 2, let x = Double(rest[0]), let y = Double(rest[1]) else { continue }
+            e.attributes[n] = (x, y, rest.count > 2 ? Int(rest[2]) ?? 3 : 3)
         }
         // `#chain`: `digit curve frames` or `digit $table`, then the tables: `$name`,
         // `default curve`, `frame n`, `from to curve frames`.

@@ -318,6 +318,92 @@ public final class FESPlayer: @unchecked Sendable {
         return true
     }
 
+    // MARK: Keys and the pad
+
+    public enum Direction: Sendable { case up, down, left, right }
+
+    /// The arrows (or the d-pad): the highlight moves to the nearest button that way, as the
+    /// pointer would light it (its `FOCUS` block runs). The buttons are those of the topmost
+    /// screen that has any, enabled and shown: on screens with `#KEYBLOCK` tables (title,
+    /// save and load, dialogs) the ones named there, elsewhere (CONFIG, the backlog) every
+    /// button and slider. With nothing lit, the first press lights the top-left one; on a
+    /// slider, left and right move its knob a step. False when nothing is that way (the host
+    /// may page or scroll instead).
+    @discardableResult
+    public func moveFocus(_ direction: Direction) -> Bool {
+        let candidates = navigable()
+        guard !candidates.isEmpty else { return false }
+        guard let current = focused, let from = candidates.first(where: { $0.object === current.object }) else {
+            let first = candidates.min { ($0.rect.y / 24, $0.rect.x) < ($1.rect.y / 24, $1.rect.x) }!
+            focus(first.instance, first.object)
+            return true
+        }
+        if from.object.type == "SLIDER", direction == .left || direction == .right {
+            let o = from.object
+            let span = o.range.max - o.range.min
+            let step = max(1, (span + 10) / 20)
+            let v = min(o.range.max, max(o.range.min, o.value + (direction == .right ? step : -step)))
+            if v != o.value {
+                o.value = v
+                o.revision += 1
+                from.instance.runEvent(o, "SCRL_P")
+            }
+            return true
+        }
+        let cx = Double(from.rect.x) + Double(from.rect.w) / 2, cy = Double(from.rect.y) + Double(from.rect.h) / 2
+        var best: (score: Double, item: Navigable)?
+        for c in candidates where c.object !== from.object {
+            let dx = Double(c.rect.x) + Double(c.rect.w) / 2 - cx, dy = Double(c.rect.y) + Double(c.rect.h) / 2 - cy
+            let (along, across): (Double, Double)
+            switch direction {
+            case .right: (along, across) = (dx, dy)
+            case .left: (along, across) = (-dx, dy)
+            case .down: (along, across) = (dy, dx)
+            case .up: (along, across) = (-dy, dx)
+            }
+            guard along > 4 else { continue }
+            let score = along + abs(across) * 2.5
+            if best.map({ score < $0.score }) ?? true { best = (score, c) }
+        }
+        guard let target = best?.item else { return false }
+        focus(target.instance, target.object)
+        return true
+    }
+
+    /// Whether something is lit for the keys (or the pointer).
+    public var hasFocus: Bool { focused.map { f in instances.contains { $0 === f.instance } } ?? false }
+
+    /// Takes the highlight away (a tap after the keys).
+    public func clearFocus() { unfocus() }
+
+    private struct Navigable {
+        let instance: FESInstance
+        let object: FESObject
+        let rect: (x: Int, y: Int, w: Int, h: Int)
+    }
+
+    private func navigable() -> [Navigable] {
+        for s in instances.reversed() {
+            let names = s.keyNames
+            var out: [Navigable] = []
+            for o in s.objects where o.enable && (o.type == "BUTTON" || o.type == "SLIDER") && !suppressed.contains(o.baseName) {
+                if !names.isEmpty, !names.contains(o.baseName) { continue }
+                guard s.planeShown(o), let r = s.hitRect(o), r.w > 0, r.h > 0,
+                      r.x < width, r.y < height, r.x + r.w > 0, r.y + r.h > 0 else { continue }
+                out.append(Navigable(instance: s, object: o, rect: r))
+            }
+            if !out.isEmpty { return out }
+        }
+        return []
+    }
+
+    private func focus(_ owner: FESInstance, _ o: FESObject) {
+        guard focused?.object !== o else { return }
+        unfocus()
+        owner.runEvent(o, "FOCUS")
+        focused = (owner, o)
+    }
+
     /// Whether a drag at (x, y) would move a slider.
     public func isSlider(atX x: Int, y: Int) -> Bool {
         guard let (_, o) = hit(x, y) else { return false }

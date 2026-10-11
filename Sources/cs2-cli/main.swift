@@ -378,6 +378,7 @@ case "play", "snapshot":
         } catch { fail("\(error)") }
     }
     let player = ScenePlayer(game: g, variables: variables)
+    player.emote = EmoteCast(game: g)
     do { try player.start(first) } catch { fail("\(error)") }
     var lines = 0, scenes = 0, commands = 0
     var lastMessage: ScenePlayer.Message?
@@ -401,6 +402,8 @@ case "play", "snapshot":
                 }
             case .missingScene(let name):
                 print("(no scene \(name) in this release)")
+            case .input:
+                if command == "play", !textOnly { print("   (click)") }
             case .end(let why):
                 print("== end: \(why)")
             }
@@ -758,7 +761,8 @@ case "emoteinfo":
 case "fesrun":
     // A system screen headless against a sample host (saves, settings and a backlog in
     // memory): `--do` lists frame:action steps (`click x,y`, `rclick`, `hover x,y`,
-    // `wheel up|down`, `shot name`), every action logged with the scripts' stack.
+    // `wheel up|down`, `key up|down|left|right|enter`, `shot name`), every action logged
+    // with the scripts' stack.
     guard rest.count >= 3 else { fail("fesrun <base> <script> <out dir> [--do steps] [--set n=v,…] [--saves N]") }
     let g = game(rest[0])
     let out = URL(fileURLWithPath: rest[2])
@@ -795,6 +799,14 @@ case "fesrun":
             case "hover" where xy.count == 2: player.hover(atX: xy[0], y: xy[1]); print(frame, "hover", xy, "→", player.button(atX: xy[0], y: xy[1]) ?? "nothing")
             case "rclick": player.rightClick(); print(frame, "right click")
             case "wheel": player.scroll(up: words.count > 1 && words[1] == "up"); print(frame, "wheel")
+            case "key" where words.count > 1:
+                // `key up|down|left|right|enter`: the arrows and Enter as the app sends them.
+                let directions: [String: FESPlayer.Direction] = ["up": .up, "down": .down, "left": .left, "right": .right]
+                if let d = directions[words[1]] {
+                    print(frame, "key", words[1], "→", player.moveFocus(d) ? "moved" : "nothing that way")
+                } else {
+                    print(frame, "key enter →", player.pressFocused() ? "pressed" : "nothing lit")
+                }
             case "shot" where words.count > 1: shot(words[1])
             default: print("? \(action)")
             }

@@ -66,6 +66,27 @@ public final class EmoteCast: @unchecked Sendable {
         lock.withLock { profiles.pose(spec, body: body) }
     }
 
+    /// Where a character's attribute `number` is on the 1280×720 screen (`mpl N m2att`), and
+    /// the attribute's extra value (the size: 1 small … 4 large). The `.dif`'s `#attribute`
+    /// gives an offset (`0 -50`) from the head; the head is where the model's face outline
+    /// (`頭部変形基礎/■輪郭`) is placed in the pose, scaled and placed as the character is.
+    public func attribute(_ c: ScenePlayer.Character, number: Int, width: Int = 1280, height: Int = 720) -> (x: Double, y: Double, extra: Int)? {
+        guard let spec = c.model, let pose = pose(spec, body: c.body) else { return nil }
+        let offset = pose.face.attributes[number] ?? (x: 0, y: -50, extra: 3)
+        let m = Double(c.scaleX) / 100
+        let scale = pose.scaleX * m
+        let originX = Double(c.x ?? 640) + pose.positionX + Double(width) / 2 + pose.scaleOffsetX * (1 - m)
+        let originY = Double(c.y ?? 360) + pose.positionY + Double(height) / 2 + pose.scaleOffsetY * (1 - m)
+        var head = (x: 0.0, y: -445.0)
+        if let renderer = loadedRenderer(pose.model) ?? renderer(pose.model) {
+            var variables = renderer.model.restingVariables()
+            for (k, v) in pose.variables { variables[k] = v }
+            renderer.model.applySelectors(&variables)
+            if let p = renderer.position(ofLayer: "輪郭", variables: variables) { head = p }
+        }
+        return (originX + (head.x + offset.x) * scale, originY + (head.y + offset.y) * scale, offset.extra)
+    }
+
     /// A character drawn for `spec` (`ca01,1,1,b,3,0,4`) and `m2body` digits, at `scale`
     /// times its profile's scale. `pose` says where the model's origin goes.
     public func draw(_ spec: String, body: [String], scale: Double) -> (image: EmoteImage, pose: EmoteProfiles.Pose)? {

@@ -99,6 +99,16 @@ public final class EmoteRenderer: @unchecked Sendable {
         }
     }
 
+    /// Where the first image of a layer whose label contains `name` (`輪郭`, the face's
+    /// outline) is placed, in the model's coordinates: its icon's origin.
+    public func position(ofLayer name: String, variables: [String: Double], time: Double = 0) -> (x: Double, y: Double)? {
+        let (items, instances) = items(variables: variables, time: time, root: Node(parent: nil, bends: false))
+        defer { for instance in instances { instance.subtree = [:] } }
+        guard let item = items.first(where: { $0.label.contains(name) }) else { return nil }
+        let p = item.node.toRoot(0, 0)
+        return (p.0, p.1)
+    }
+
     final class Instance {
         /// Items by layer label, with every descendant's items (for stencil masks).
         var subtree: [String: [Item]] = [:]
