@@ -102,7 +102,13 @@ public struct HGImage: Sendable {
                 }
                 guard bpp == 32 || bpp == 24 else { throw Failure.malformed("frame \(id): \(bpp) bits per pixel") }
                 rgba = [UInt8](repeating: 0, count: width * height * 4)
-                for part in parts { try decodePart(bytes, part.payload, width: width, height: height, bpp: bpp, into: &rgba) }
+                do {
+                    for part in parts { try decodePart(bytes, part.payload, width: width, height: height, bpp: bpp, into: &rgba) }
+                } catch {
+                    // One odd frame (sys_meswnd's 8×8 frame 31 has a run total for 32 rows)
+                    // shouldn't cost the picture its other frames: it stays transparent.
+                    rgba = [UInt8](repeating: 0, count: width * height * 4)
+                }
             }
         }
         return Frame(id: id, width: width, height: height, bitsPerPixel: bpp,

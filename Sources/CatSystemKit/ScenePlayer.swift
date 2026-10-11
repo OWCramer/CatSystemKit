@@ -42,7 +42,7 @@ public final class ScenePlayer {
         case end(String)
     }
 
-    public struct Plane: Sendable {
+    public struct Plane: Sendable, Codable, Equatable {
         public var kind: String
         public var file: String?
         public var color: UInt32?
@@ -93,6 +93,56 @@ public final class ScenePlayer {
         frames = []
         finished = false
         try enter(scene)
+    }
+
+    /// Where the story is and what the screen shows, for a save: the scenes running (a
+    /// `call` keeps its caller below it), the planes, characters, music and variables.
+    /// Taken while a message is shown, it resumes with the message after it.
+    public struct Snapshot: Codable, Sendable {
+        public struct Position: Codable, Sendable {
+            public var scene: String
+            public var line: Int
+            public var messageIndex: Int
+        }
+
+        public var stack: [Position]
+        public var planes: [Int: Plane]
+        public var characters: [Int: String]
+        public var characterX: [Int: Int]
+        public var bgm: String?
+        public var variables: [Int: Int]
+    }
+
+    public func snapshot() -> Snapshot {
+        Snapshot(stack: frames.map { .init(scene: $0.name, line: $0.line, messageIndex: $0.messageIndex) },
+                 planes: planes, characters: characters, characterX: characterX, bgm: bgm, variables: variables)
+    }
+
+    /// Picks the story up where `snapshot` was taken.
+    public func restore(_ snapshot: Snapshot) throws {
+        frames = []
+        pending = []
+        speaker = nil
+        text = ""
+        inMessage = false
+        pendingVoice = nil
+        finished = false
+        for position in snapshot.stack {
+            guard let bytes = try files(position.scene + ".cst") else {
+                throw CatSystemGame.Failure.notCatSystem(URL(fileURLWithPath: position.scene + ".cst"))
+            }
+            let scene = try CatScene(bytes)
+            let translation = try files(position.scene + ".cstl").flatMap { try? SceneTranslation($0) }
+            frames.append(Frame(name: position.scene, scene: scene, translation: translation,
+                                line: min(position.line, scene.lines.count), messageIndex: position.messageIndex))
+        }
+        planes = snapshot.planes
+        characters = snapshot.characters
+        characterX = snapshot.characterX
+        bgm = snapshot.bgm
+        sounds = [:]
+        voice = nil
+        variables = snapshot.variables
     }
 
     /// The scene and line the player is at.
@@ -386,12 +436,14 @@ public final class ScenePlayer {
     /// The screen as straight RGBA (`width`×`height`): planes by number, pictures from HG-3
     /// (frame 0, anchored at its base point when it has one), colour planes, and a
     /// placeholder silhouette for each E-mote character over the background.
-    public func render(width: Int, height: Int, pictures: (String) -> HGImage?) -> [UInt8] {
+    public func render(width: Int, height: Int, characters drawsCharacters: Bool = true,
+                       pictures: (String) -> HGImage?) -> [UInt8] {
         var canvas = Canvas(width: width, height: height)
         let order = planes.keys.sorted()
         var charactersDrawn = false
         func drawCharacters() {
             charactersDrawn = true
+            guard drawsCharacters else { return }
             let shown = characters.keys.sorted()
             for (i, n) in shown.enumerated() {
                 let x = characterX[n] ?? width * (i + 1) / (shown.count + 1)

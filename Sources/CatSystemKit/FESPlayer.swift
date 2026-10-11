@@ -29,6 +29,32 @@ public final class FESPlayer {
     /// The story script `execkcs` asked for (`sscript` when the game starts), if any.
     public private(set) var requestedKCS: String?
 
+    /// A sound a script started or stopped: `channel` is its object (`voice`, `se1`,
+    /// `bgmtbl`), `table` true for a music table (`SNDTABLE`), `file` the Ogg's name
+    /// without extension (`A_title_002`, `se_sys_05`, `bgm_01`); nil with `stop`.
+    public struct Sound: Sendable {
+        public let channel: String
+        public let table: Bool
+        public let file: String?
+        public let loop: Bool
+        public var stop: Bool { file == nil }
+    }
+
+    /// Sets a `$n` variable before or while the scripts run (`$897 = 1`: the language was
+    /// chosen before, so the title flow skips the picker).
+    public func setVariable(_ index: Int, _ value: Int) { globals[index] = value }
+
+    /// The code the root script gave `exit`, once it has.
+    public var rootExitCode: Int? { root?.finished }
+
+    /// Sounds since the last `takeSounds()`, for a host that plays them.
+    public func takeSounds() -> [Sound] {
+        defer { sounds = [] }
+        return sounds
+    }
+
+    var sounds: [Sound] = []
+
     var globals: [Int: Int] = [:]
     var strings: [Int: String] = [:]
     var root: FESInstance?
@@ -93,6 +119,61 @@ public final class FESPlayer {
         return false
     }
 
+    /// The button a click at (x, y) on the screen would press: the shown, enabled button
+    /// with a `PUSH_L` block whose picture covers the point, topmost first.
+    public func button(atX x: Int, y: Int) -> String? {
+        var best: (depth: Int, pri: Int, plane: Int, key: String)?
+        var depth = 0
+        var i = root
+        while let s = i {
+            var planes: [String: FESObject] = [:]
+            for o in s.objects where o.isPlane { planes[o.key] = o }
+            for o in s.objects where o.type == "BUTTON" && o.disp && o.enable && s.hasBlock("\(o.baseName).PUSH_L") {
+                let plane = o.plane.flatMap { planes[$0] ?? planes[$0 + "[0]"] }
+                if let plane, !plane.disp { continue }
+                let originX = (plane?.x ?? 0) + o.x, originY = (plane?.y ?? 0) + o.y
+                var rect: (x: Int, y: Int, w: Int, h: Int)
+                if o.width > 0, o.height > 0 {
+                    rect = (originX, originY, o.width, o.height)
+                } else if let file = o.file, let image = picture(file),
+                          let frame = o.currentID.flatMap(image.frame(id:)) ?? o.ids.first.flatMap(image.frame(id:)) ?? image.frames.first {
+                    rect = (originX + frame.offsetX, originY + frame.offsetY, frame.width, frame.height)
+                } else {
+                    continue
+                }
+                guard x >= rect.x, x < rect.x + rect.w, y >= rect.y, y < rect.y + rect.h else { continue }
+                // A child script's buttons sit over its parent's; inside one script, by priority.
+                let order = (depth, plane?.pri ?? o.pri, plane == nil ? Int.min : o.pri)
+                if best.map({ order >= ($0.depth, $0.pri, $0.plane) }) ?? true {
+                    best = (depth, order.1, order.2, o.key)
+                }
+            }
+            i = s.child
+            depth += 1
+        }
+        return best?.key
+    }
+
+    /// Changes whenever what `render()` draws may have changed (objects shown, their
+    /// frames, places and fades), so a host redraws only then.
+    public var drawState: Int {
+        var hasher = Hasher()
+        hasher.combine(base?.count ?? 0)
+        hasher.combine(baseRevision)
+        visit { o in
+            hasher.combine(o.disp)
+            guard o.disp else { return }
+            hasher.combine(o.alpha)
+            hasher.combine(o.x)
+            hasher.combine(o.y)
+            hasher.combine(o.currentID)
+            hasher.combine(o.file)
+        }
+        return hasher.finalize()
+    }
+
+    private var baseRevision = 0
+
     func load(_ name: String, parent: FESInstance?) throws -> FESInstance {
         guard let bytes = try game.file(named: name.hasSuffix(".fes") ? name : name + ".fes") else {
             throw CatSystemGame.Failure.notCatSystem(URL(fileURLWithPath: name + ".fes"))
@@ -117,7 +198,10 @@ public final class FESPlayer {
         return low + Int(randomState >> 16) % max(1, high - low + 1)
     }
 
-    func snapshotBase() { base = render() }
+    func snapshotBase() {
+        base = render()
+        baseRevision += 1
+    }
 
     // MARK: Drawing
 
@@ -218,6 +302,9 @@ final class FESObject {
     var enable = true
     var color: UInt32?
     var alpha = 255
+    /// A sound's loaded file, and a music table's entries.
+    var sound: String?
+    var soundTable: [Int: String] = [:]
     private var fade: (from: Int, to: Int, frames: Int, elapsed: Int)?
 
     init(type: String, baseName: String, index: Int?) {
@@ -272,6 +359,8 @@ final class FESInstance: FESContext {
     private var waitMotion = false
     /// The button whose event block is running (`@`).
     private var eventObject: FESObject?
+
+    func hasBlock(_ name: String) -> Bool { program.blocks[name] != nil }
 
     init(name: String, program: FESProgram, player: FESPlayer, parent: FESInstance?) {
         self.name = name
@@ -538,10 +627,19 @@ final class FESInstance: FESContext {
             let p = params.map(value)
             if p.count >= 2 { o.x = p[0]; o.y = p[1] }
         case "load":
+            o.sound = params.first.map(text)
             player.note("\(o.key) load \(params.first.map(text) ?? "")")
         case "play":
+            let table = o.type == "SNDTABLE"
+            let file = table ? o.soundTable[o.idIndex] ?? o.soundTable.sorted { $0.key < $1.key }.first?.value : o.sound
+            if let file { player.sounds.append(.init(channel: o.key, table: table, file: file, loop: table)) }
             player.note("\(o.key) play")
-        case "noact", "stop", "sndtbl", "setid_s", "crossfade", "loop", "shuffle", "getid", "next", "rev":
+        case "stop":
+            if o.type == "SOUND" || o.type == "SNDTABLE" { player.sounds.append(.init(channel: o.key, table: o.type == "SNDTABLE", file: nil, loop: false)) }
+        case "sndtbl":
+            // `bgmtbl sndtbl 00 bgm_01 $600`: entry 0 is bgm_01.
+            if params.count >= 2, let n = Int(params[0]) { o.soundTable[n] = params[1] }
+        case "noact", "setid_s", "crossfade", "loop", "shuffle", "getid", "next", "rev":
             break
         default:
             player.noteOnce("\(name): \(o.type) \(o.baseName) \(sub) not handled")
