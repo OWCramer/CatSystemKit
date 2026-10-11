@@ -9,6 +9,9 @@ import Foundation
 /// - `quake f,x,y f,x,y …` moves the plane by each offset in turn, `f` frames each (the
 ///   last one is usually `0,0`). Without a plane number every plane shakes: the screen.
 /// - `pl stop` ends every motion at once.
+/// - The `m2` motions are the scenes' long, slow pans and zooms (`pl 5 m2move 5000 760 360`):
+///   `m2move` as `move`, `m2amove1`/`m2amove1p` as `amove1`, `m2scale` linear, `m2ascale1p` as
+///   `ascale1`.
 ///
 /// Times are in seconds (any clock), at 60 frames a second as the game counts them.
 public final class PlaneStage {
@@ -102,14 +105,16 @@ public final class PlaneStage {
             guard let plane = planes[n] else { motions[n] = nil; continue }
             guard let m = motions[n] else { motions[n] = Motion(plane); continue }
             switch sub {
-            case "amove1", "amove2", "amove3", "move":
+            case "amove1", "amove2", "amove3", "move", "m2move", "m2amove1", "m2amove1p":
                 let frames = number(1) ?? 0
-                let curve: EmoteStage.Curve = sub == "amove1" ? .easeOut : sub == "amove2" ? .easeIn : sub == "amove3" ? .easeInOut : .linear
+                let curve: EmoteStage.Curve = sub == "amove2" ? .easeIn : sub == "amove3" ? .easeInOut
+                    : sub == "move" || sub == "m2move" ? .linear : .easeOut
                 m.x.move(to: Double(plane.x ?? 640), frames: frames, curve: curve, at: frame)
                 m.y.move(to: Double(plane.y ?? 360), frames: frames, curve: curve, at: frame)
-            case "ascale1", "ascale2", "ascale3":
+            case "ascale1", "ascale2", "ascale3", "m2scale", "m2ascale1p":
                 let frames = number(1) ?? 0
-                let curve: EmoteStage.Curve = sub == "ascale1" ? .easeOut : sub == "ascale2" ? .easeIn : .easeInOut
+                let curve: EmoteStage.Curve = sub == "ascale2" ? .easeIn : sub == "ascale3" ? .easeInOut
+                    : sub == "m2scale" ? .linear : .easeOut
                 m.scaleX.move(to: Double(plane.scaleX ?? 100), frames: frames, curve: curve, at: frame)
                 m.scaleY.move(to: Double(plane.scaleY ?? plane.scaleX ?? 100), frames: frames, curve: curve, at: frame)
             case "fade", "m2fade":

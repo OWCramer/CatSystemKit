@@ -30,6 +30,8 @@ public struct HGImage: Sendable {
         public let baseY: Int
         /// Section names in order, for inspection.
         public let sections: [String]
+        /// The small metadata sections' payloads (`cptype`, `imgmode`, `ats`), for inspection.
+        public var metadata: [String: [UInt8]] = [:]
         /// Straight (non-premultiplied) RGBA, top row first.
         public let rgba: [UInt8]
     }
@@ -111,11 +113,15 @@ public struct HGImage: Sendable {
                 }
             }
         }
+        var metadata: [String: [UInt8]] = [:]
+        for section in sections where !section.name.hasPrefix("img") || section.name == "imgmode" {
+            if section.payload.count <= 64 { metadata[section.name] = Array(bytes[section.payload]) }
+        }
         return Frame(id: id, width: width, height: height, bitsPerPixel: bpp,
                      offsetX: signed(p + 12), offsetY: signed(p + 16),
                      canvasWidth: Int(bytes.le32(p + 20)), canvasHeight: Int(bytes.le32(p + 24)),
                      baseX: signed(p + 32), baseY: signed(p + 36),
-                     sections: sections.map(\.name), rgba: rgba)
+                     sections: sections.map(\.name), metadata: metadata, rgba: rgba)
     }
 
     /// One `img0000` section: rows `top ..< top + rows` of the picture, counted from the top.

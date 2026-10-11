@@ -16,6 +16,7 @@ import UniformTypeIdentifiers
 ///   cs2-cli scenes <base folder>                  every scene with line and command counts
 ///   cs2-cli scene <base folder> <name.cst>        a scene, one line per entry
 ///   cs2-cli commands <base folder>                command words across every scene
+///   cs2-cli sweep <base folder> [--decode]        every story scene checked: ignored commands, bad frames
 ///   cs2-cli fes <base folder> <name.fes>          a FES (system screen) script as text
 ///   cs2-cli boot <base folder> <out dir> [frames]  flow.fes headless, screens to PNG
 ///   cs2-cli fesrun <base> <script> <out dir> [--do "30:click 640,360;60:shot a;…"] [--set 800=1,…] [--saves N]
@@ -163,7 +164,8 @@ case "hg":
     do {
         let image = try HGImage(file(game(rest[0]), rest[1]), pixels: false)
         for f in image.frames {
-            print("frame \(f.id): \(f.width)×\(f.height) \(f.bitsPerPixel)bpp at \(f.offsetX),\(f.offsetY) on \(f.canvasWidth)×\(f.canvasHeight), base \(f.baseX),\(f.baseY) — \(f.sections.joined(separator: " "))")
+            print("frame \(f.id): \(f.width)×\(f.height) \(f.bitsPerPixel)bpp at \(f.offsetX),\(f.offsetY) on \(f.canvasWidth)×\(f.canvasHeight), base \(f.baseX),\(f.baseY) — \(f.sections.joined(separator: " "))"
+                  + f.metadata.sorted { $0.key < $1.key }.map { " \($0.key)=" + $0.value.map { String(format: "%02x", $0) }.joined() }.joined())
         }
     } catch { fail("\(error)") }
 
@@ -258,6 +260,11 @@ case "raw":
     // A file's bytes as stored (decrypted), for study in a scratch folder.
     guard rest.count >= 3 else { fail("raw <base> <file> <out>") }
     do { try Data(file(game(rest[0]), rest[1])).write(to: URL(fileURLWithPath: rest[2])) } catch { fail("\(error)") }
+
+case "sweep":
+    // sweep <base> [--decode]: every story scene, headless, checked (see Sweep.swift).
+    guard let path = rest.first else { fail("sweep <base> [--decode]") }
+    sweep(game(path), decode: args.contains("--decode"))
 
 case "names":
     // Every file name, archive by archive (names unscrambled with the game's key).
@@ -442,7 +449,14 @@ case "play", "snapshot":
         writePNG(rgba, width: g.screenWidth, height: g.screenHeight, to: URL(fileURLWithPath: rest[1]))
         let shown = player.planes.keys.sorted().compactMap { n -> String? in
             guard let p = player.planes[n], p.visible, p.alpha > 0 else { return nil }
-            return "\(n):\(p.file ?? p.color.map { String(format: "$%08X", $0) } ?? "?")"
+            let shown = p.orderedPictures.map { q in
+                "\(q.kind)\(q.slot)=" + (q.file ?? q.color.map { String(format: "$%08X", $0) } ?? "?")
+                    + (q.x != nil || q.y != nil ? "@\(q.x.map(String.init) ?? "-"),\(q.y.map(String.init) ?? "-")" : "")
+                    + (q.mask == true ? "(mask)" : "") + (q.effect.isNone ? "" : "(\(q.effect.key))")
+            }
+            return "\(n):" + ([p.color.map { String(format: "$%08X", $0) }].compactMap { $0 } + shown).joined(separator: "+")
+                + (p.x != nil || p.y != nil ? " pos \(p.x.map(String.init) ?? "-"),\(p.y.map(String.init) ?? "-")" : "")
+                + (p.priority.map { " pri \($0)" } ?? "")
         }
         print("planes \(shown.joined(separator: " ")); characters \(player.characters.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))")
     }

@@ -115,4 +115,64 @@ struct Canvas {
             }
         }
     }
+
+    /// A picture as `StageLayout` places it: its pixels stretched over the quad's rectangle
+    /// (mirrored as it says, sampled nearest), faded, laid over or added, and only where its
+    /// mask is opaque.
+    mutating func draw(_ frame: HGImage.Frame, quad q: StageLayout.Quad, mask: HGImage.Frame?) {
+        guard frame.rgba.count >= frame.width * frame.height * 4 else { return }
+        fill(quad: q, mask: mask) { u, v in
+            let fx = min(frame.width - 1, max(0, Int(u * Double(frame.width))))
+            let fy = min(frame.height - 1, max(0, Int(v * Double(frame.height))))
+            let s = (fy * frame.width + fx) * 4
+            return (Int(frame.rgba[s]), Int(frame.rgba[s + 1]), Int(frame.rgba[s + 2]), Int(frame.rgba[s + 3]))
+        }
+    }
+
+    /// A colour (`0xAARRGGBB`) over the quad's rectangle.
+    mutating func draw(color: UInt32, quad q: StageLayout.Quad, mask: HGImage.Frame?) {
+        let c = (Int(color >> 16 & 0xFF), Int(color >> 8 & 0xFF), Int(color & 0xFF), Int(color >> 24))
+        fill(quad: q, mask: mask) { _, _ in c }
+    }
+
+    private mutating func fill(quad q: StageLayout.Quad, mask: HGImage.Frame?, sample: (Double, Double) -> (Int, Int, Int, Int)) {
+        guard q.width > 0, q.height > 0, q.alpha > 0 else { return }
+        let x0 = max(0, Int(q.x.rounded(.down))), x1 = min(width, Int((q.x + q.width).rounded(.up)))
+        let y0 = max(0, Int(q.y.rounded(.down))), y1 = min(height, Int((q.y + q.height).rounded(.up)))
+        guard x0 < x1, y0 < y1 else { return }
+        let alpha = Int((q.alpha * 255).rounded())
+        for yy in y0..<y1 {
+            var v = (Double(yy) + 0.5 - q.y) / q.height
+            guard v >= 0, v < 1 else { continue }
+            if q.flipY { v = 1 - v }
+            for xx in x0..<x1 {
+                var u = (Double(xx) + 0.5 - q.x) / q.width
+                guard u >= 0, u < 1 else { continue }
+                if q.flipX { u = 1 - u }
+                var (r, g, b, a) = sample(u, v)
+                a = a * alpha / 255
+                if let m = q.mask {
+                    guard let mask else { continue }
+                    var mu = (Double(xx) + 0.5 - m.x) / m.width, mv = (Double(yy) + 0.5 - m.y) / m.height
+                    guard mu >= 0, mu < 1, mv >= 0, mv < 1 else { continue }
+                    if m.flipX { mu = 1 - mu }
+                    if m.flipY { mv = 1 - mv }
+                    let mx = min(mask.width - 1, Int(mu * Double(mask.width))), my = min(mask.height - 1, Int(mv * Double(mask.height)))
+                    a = a * Int(mask.rgba[(my * mask.width + mx) * 4 + 3]) / 255
+                }
+                guard a > 0 else { continue }
+                let d = (yy * width + xx) * 4
+                if q.additive {
+                    pixels[d] = UInt8(min(255, Int(pixels[d]) + r * a / 255))
+                    pixels[d + 1] = UInt8(min(255, Int(pixels[d + 1]) + g * a / 255))
+                    pixels[d + 2] = UInt8(min(255, Int(pixels[d + 2]) + b * a / 255))
+                } else {
+                    pixels[d] = UInt8((r * a + Int(pixels[d]) * (255 - a)) / 255)
+                    pixels[d + 1] = UInt8((g * a + Int(pixels[d + 1]) * (255 - a)) / 255)
+                    pixels[d + 2] = UInt8((b * a + Int(pixels[d + 2]) * (255 - a)) / 255)
+                }
+                pixels[d + 3] = UInt8(min(255, a + Int(pixels[d + 3]) * (255 - a) / 255))
+            }
+        }
+    }
 }

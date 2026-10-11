@@ -218,7 +218,7 @@ private func translationFile(_ messages: [(String, String)]) -> [UInt8] {
     #expect(messages.map(\.index) == [0, 0])
     #expect(messages.first?.voice == "V1")
     #expect(player.variables[10] == 3 && player.variables[11] == 3)
-    #expect(player.planes[0]?.file == "bgA")
-    #expect(player.planes[1]?.file == "CG1")
+    #expect(player.planes[0]?.picture("bg")?.file == "bgA")
+    #expect(player.planes[1]?.picture("eg")?.file == "CG1")
     #expect(player.planes[1]?.baseX == 10 && player.planes[1]?.alpha == 128)
 }

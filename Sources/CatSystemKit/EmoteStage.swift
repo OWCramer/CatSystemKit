@@ -103,6 +103,7 @@ public final class EmoteStage {
         var x = Tween(640), y = Tween(360)
         var alpha = Tween(255)
         var scaleX = Tween(100), scaleY = Tween(100)
+        var rotation = 0.0
         var visible = true
         var idleStart = 0.0
         var nextBlink = 0.0
@@ -266,6 +267,7 @@ public final class EmoteStage {
         a.x.snap(Double(c.x ?? 640)); a.y.snap(Double(c.y ?? 360))
         a.alpha.snap(Double(c.alpha))
         a.scaleX.snap(Double(c.scaleX)); a.scaleY.snap(Double(c.scaleY))
+        a.rotation = Double(c.rotation ?? 0)
         a.visible = c.visible
         // Characters that come on together don't breathe in step.
         a.idleStart = frame - Double.random(in: 0..<90, using: &random)
@@ -297,7 +299,8 @@ public final class EmoteStage {
             switch verb {
             case "pos":
                 a.x.snap(Double(c.x ?? 640)); a.y.snap(Double(c.y ?? 360))
-            case "amove1", "amove2", "amove3", "move":
+            case "amove1", "amove2", "amove3", "move", "m2move":
+                // `m2move`: a long, slow move (with its plane's `pl N m2move`).
                 let frames = number(1) ?? 0
                 let curve: Curve = verb == "amove1" ? .easeOut : verb == "amove2" ? .easeIn : verb == "amove3" ? .easeInOut : .linear
                 a.x.move(to: Double(c.x ?? 640), frames: frames, curve: curve, at: frame)
@@ -313,6 +316,8 @@ public final class EmoteStage {
                 a.alpha.snap(Double(c.alpha))
             case "disp":
                 a.visible = c.visible
+            case "rot":
+                a.rotation = Double(c.rotation ?? 0)
             case "scale":
                 a.scaleX.snap(Double(c.scaleX)); a.scaleY.snap(Double(c.scaleY))
             case "ascale1", "ascale2", "ascale3":
@@ -415,10 +420,13 @@ public final class EmoteStage {
         public let scaleX: Double, scaleY: Double
         public let alpha: Double
         public let model: String
+        /// `mpl N rot 0 0 degrees`: turned clockwise about its origin.
+        public var rotation = 0.0
 
         /// The same drawing at another opacity.
         public func fading(_ alpha: Double) -> Drawing {
-            Drawing(bank: bank, renderer: renderer, variables: variables, x: x, y: y, scaleX: scaleX, scaleY: scaleY, alpha: alpha, model: model)
+            Drawing(bank: bank, renderer: renderer, variables: variables, x: x, y: y, scaleX: scaleX, scaleY: scaleY, alpha: alpha,
+                    model: model, rotation: rotation)
         }
     }
 
@@ -504,7 +512,7 @@ public final class EmoteStage {
                                x: x + pose.positionX + width / 2 + pose.scaleOffsetX * (1 - mx),
                                y: y + pose.positionY + height / 2 + pose.scaleOffsetY * (1 - my),
                                scaleX: pose.scaleX * mx, scaleY: pose.scaleY * my,
-                               alpha: alpha / 255, model: pose.model))
+                               alpha: alpha / 255, model: pose.model, rotation: a.rotation))
         }
         return out
     }
