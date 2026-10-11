@@ -79,6 +79,7 @@ public final class EmoteRenderer {
     struct Item {
         let node: Node
         let texture: EmoteModel.Texture
+        let textureIndex: Int
         let icon: EmoteModel.Icon
         let divisions: Int
         let opacity: Double
@@ -161,8 +162,9 @@ public final class EmoteRenderer {
             if state != nil {
                 switch layer.type {
                 case 0 where src != "blank":
-                    if let icon, let texture = model.sources[src]?.texture, node.opacity > 0 {
-                        own.append(Item(node: node, texture: texture, icon: icon,
+                    if let icon, let source = model.sources[src], let texture = source.texture,
+                       let textureIndex = source.textureIndex, node.opacity > 0 {
+                        own.append(Item(node: node, texture: texture, textureIndex: textureIndex, icon: icon,
                                         divisions: node.bent ? max(1, min(32, layer.meshDivision)) : 1,
                                         opacity: node.opacity, clips: clips, label: motionName + "/" + layer.label))
                     }

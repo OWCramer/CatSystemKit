@@ -32,6 +32,8 @@ public final class EmoteModel {
 
     public struct Source {
         public let texture: Texture?
+        /// The texture's place in `textures`.
+        public let textureIndex: Int?
         public let icons: [String: Icon]
     }
 
@@ -110,14 +112,30 @@ public final class EmoteModel {
         public let options: [(label: String, on: Double, off: Double)]
     }
 
+    /// A timeline's key: from `time`, the variable heads for `value` and gets there one frame
+    /// before the next key (E-mote's timeline control sets each key's value as a target with
+    /// the gap to the next key as its transition). `value` nil is a type-0 key: the end.
+    public struct Key {
+        public let time: Double
+        public let value: Double?
+        /// The curve's exponent (`progress ^ weight`): `easing` e > 0 gives e + 1, e < 0
+        /// gives 1 / (1 − e), 0 is linear.
+        public let weight: Double
+    }
+
     public struct Timeline {
         public let label: String
         public let loopBegin: Double, loopEnd: Double
-        /// Variable → keys (time, value, tweened to the next key).
-        public let tracks: [String: [(time: Double, value: Double?, tween: Bool)]]
+        /// A difference timeline (`diff`, the `差分用_…` idle loops): its values are added to
+        /// the pose rather than replacing it.
+        public let difference: Bool
+        /// Variable → keys.
+        public let tracks: [String: [Key]]
     }
 
     public let sources: [String: Source]
+    /// Every source's texture, in a fixed order (for a GPU to upload once).
+    public let textures: [Texture]
     public let objects: [String: [String: Motion]]
     public let baseObject: String
     public let baseMotion: String
@@ -129,7 +147,8 @@ public final class EmoteModel {
         let root = psb.root
         guard root["id"]?.string == "motion" else { throw PSBFile.Failure.notPSB }
         var sources: [String: Source] = [:]
-        for (name, value) in root["source"]?.dictionary ?? [:] {
+        var textures: [Texture] = []
+        for (name, value) in (root["source"]?.dictionary ?? [:]).sorted(by: { $0.key < $1.key }) {
             var icons: [String: Icon] = [:]
             for (iconName, icon) in value["icon"]?.dictionary ?? [:] {
                 icons[iconName] = Icon(left: icon["left"]?.int ?? 0, top: icon["top"]?.int ?? 0,
@@ -142,9 +161,11 @@ public final class EmoteModel {
                 let used = min(h, icons.values.map { $0.top + $0.height }.max() ?? h)
                 texture = Texture(width: w, height: used, pixels: Array(pixels.prefix(w * used * 4)))
             }
-            sources[name] = Source(texture: texture, icons: icons)
+            if let texture { textures.append(texture) }
+            sources[name] = Source(texture: texture, textureIndex: texture == nil ? nil : textures.count - 1, icons: icons)
         }
         self.sources = sources
+        self.textures = textures
 
         var objects: [String: [String: Motion]] = [:]
         for (objectName, object) in root["object"]?.dictionary ?? [:] {
@@ -175,16 +196,20 @@ public final class EmoteModel {
         var timelines: [String: Timeline] = [:]
         for t in metadata?["timelineControl"]?.list ?? [] {
             guard let label = t["label"]?.string else { continue }
-            var tracks: [String: [(time: Double, value: Double?, tween: Bool)]] = [:]
+            var tracks: [String: [Key]] = [:]
             for v in t["variableList"]?.list ?? [] {
                 guard let name = v["label"]?.string else { continue }
-                let keys = (v["frameList"]?.list ?? []).map { f in
-                    (time: f["time"]?.number ?? 0, value: f["content"]?["value"]?.number, tween: f["type"]?.int == 3)
+                let keys = (v["frameList"]?.list ?? []).map { f -> Key in
+                    let easing = f["content"]?["easing"]?.number ?? 0
+                    return Key(time: f["time"]?.number ?? 0,
+                               value: (f["type"]?.int ?? 0) == 0 ? nil : f["content"]?["value"]?.number,
+                               weight: easing > 0 ? easing + 1 : easing < 0 ? 1 / (1 - easing) : 1)
                 }
                 if !keys.isEmpty { tracks[name] = keys }
             }
             timelines[label] = Timeline(label: label, loopBegin: t["loopBegin"]?.number ?? -1,
-                                        loopEnd: t["loopEnd"]?.number ?? -1, tracks: tracks)
+                                        loopEnd: t["loopEnd"]?.number ?? -1,
+                                        difference: (t["diff"]?.number ?? 0) != 0, tracks: tracks)
         }
         self.timelines = timelines
     }
@@ -271,17 +296,24 @@ public final class EmoteModel {
         if timeline.loopEnd > timeline.loopBegin, timeline.loopBegin >= 0, t >= timeline.loopBegin {
             t = timeline.loopBegin + (t - timeline.loopBegin).truncatingRemainder(dividingBy: timeline.loopEnd - timeline.loopBegin)
         }
+        let looping = timeline.loopEnd > timeline.loopBegin && timeline.loopBegin >= 0
         var out: [String: Double] = [:]
         for (name, keys) in timeline.tracks {
-            guard let i = keys.lastIndex(where: { $0.time <= t }), let a = keys[i].value else { continue }
-            if i + 1 < keys.count, let b = keys[i + 1].value, keys[i + 1].time > keys[i].time {
-                let r = (t - keys[i].time) / (keys[i + 1].time - keys[i].time)
-                // Timeline keys ease in and out (E-mote's default for variable tracks).
-                let eased = 0.5 - cos(.pi * min(1, max(0, r))) / 2
-                out[name] = a + (b - a) * eased
-            } else {
-                out[name] = a
+            let valued = keys.indices.filter { keys[$0].value != nil }
+            guard let firstValued = valued.first else { continue }
+            guard let i = valued.last(where: { keys[$0].time <= t }) else {
+                out[name] = keys[firstValued].value
+                continue
             }
+            let key = keys[i], target = key.value!
+            // Where the variable was when this key began: the key before's target (the last
+            // one, in a loop that has come round).
+            let previous = valued.last(where: { $0 < i }).flatMap { keys[$0].value }
+                ?? (looping ? valued.last.flatMap { keys[$0].value } : nil) ?? target
+            let duration = i + 1 < keys.count ? max(0, keys[i + 1].time - key.time - 1) : 0
+            guard duration > 0 else { out[name] = target; continue }
+            let progress = min(1, max(0, (t - key.time) / duration))
+            out[name] = previous + (target - previous) * pow(progress, key.weight)
         }
         return out
     }

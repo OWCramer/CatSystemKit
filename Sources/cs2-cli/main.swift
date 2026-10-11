@@ -471,7 +471,18 @@ case "emote":
     guard let renderer = cast.renderer(pose.model) else { fail("no model \(pose.model)") }
     let loaded = Date()
     guard let drawn = cast.draw(rest[1], body: body, scale: scale) else { fail("draw failed") }
-    let image = drawn.image
+    var image = drawn.image
+    if let set = ProcessInfo.processInfo.environment["CS2_SET"] {
+        // CS2_SET="face_talk=3,head_LR=10": variables over the pose's.
+        var variables = renderer.model.restingVariables()
+        for (k, v) in drawn.pose.variables { variables[k] = v }
+        for pair in set.split(separator: ",") {
+            let kv = pair.split(separator: "=")
+            if kv.count == 2, let v = Double(kv[1]) { variables[String(kv[0])] = v }
+        }
+        renderer.model.applySelectors(&variables)
+        image = renderer.render(variables: variables, scale: drawn.pose.scaleX * scale)
+    }
     print("\(pose.model): \(renderer.model.objects.count) objects, \(image.width)×\(image.height), origin \(image.originX),\(image.originY);",
           String(format: "load %.2f s, draw %.2f s", loaded.timeIntervalSince(started), Date().timeIntervalSince(loaded)))
     print("variables:", drawn.pose.variables.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
@@ -489,6 +500,113 @@ case "emote":
         rgba[i * 4 + 3] = 255
     }
     writePNG(rgba, width: image.width, height: image.height, to: URL(fileURLWithPath: rest[2]))
+
+case "emotecompare":
+    // emotecompare <base> <spec> [m2body] [scale] [out prefix]: the pose drawn on the CPU and
+    // with Metal (base mip level, as the CPU samples), and how far apart they are.
+    guard rest.count >= 2 else { fail("emotecompare <base> <ca01,1,1,b,3,0,4> [m2body] [scale] [out prefix]") }
+    let g = game(rest[0])
+    let cast = EmoteCast(game: g)
+    guard let pose = cast.profiles.pose(rest[1], body: rest.count > 2 ? rest[2].split(separator: ",").map(String.init) : []),
+          let renderer = cast.renderer(pose.model) else { fail("no model for \(rest[1])") }
+    let scale = (rest.count > 3 ? Double(rest[3]) ?? 1 : 1) * pose.scaleX
+    var variables = renderer.model.restingVariables()
+    for (k, v) in pose.variables { variables[k] = v }
+    renderer.model.applySelectors(&variables)
+    var t0 = Date()
+    let cpu = renderer.render(variables: variables, scale: scale)
+    let cpuTime = Date().timeIntervalSince(t0)
+    guard cpu.width > 0, let gpu = EmoteGPU(pixelFormat: .rgba8Unorm, mipmaps: false) else { fail("no CPU drawing or no Metal device") }
+    t0 = Date()
+    var list = renderer.drawList(variables: variables, transform: (scale, 0, 0, scale, Double(cpu.originX), Double(cpu.originY)))
+    let evalTime = Date().timeIntervalSince(t0)
+    for _ in 0..<20 { list = renderer.drawList(variables: variables, transform: (scale, 0, 0, scale, Double(cpu.originX), Double(cpu.originY))) }
+    let evalAverage = Date().timeIntervalSince(t0) / 21
+    _ = gpu.textures(for: renderer.model)
+    t0 = Date()
+    guard let metal = gpu.image(list, model: renderer.model, width: cpu.width, height: cpu.height) else { fail("Metal drawing failed") }
+    let gpuTime = Date().timeIntervalSince(t0)
+    var maxDiff = 0, total = 0, over8 = 0, over32 = 0, covered = 0
+    for i in 0..<(cpu.width * cpu.height) {
+        var d = 0
+        for c in 0..<4 { d = max(d, abs(Int(cpu.rgba[i * 4 + c]) - Int(metal[i * 4 + c]))) }
+        if cpu.rgba[i * 4 + 3] > 0 || metal[i * 4 + 3] > 0 { covered += 1 }
+        maxDiff = max(maxDiff, d); total += d
+        if d > 8 { over8 += 1 }
+        if d > 32 { over32 += 1 }
+    }
+    print("\(pose.model) \(cpu.width)×\(cpu.height): \(list.items.count) images, \(list.nodes.count) nodes, \(list.stencils.count) stencils, \(list.gridCount()) grid points")
+    print(String(format: "CPU draw %.1f ms; evaluation %.2f ms (first %.2f); Metal draw %.1f ms (one-off, with readback)", cpuTime * 1000, evalAverage * 1000, evalTime * 1000, gpuTime * 1000))
+    print(String(format: "difference: max %d, mean %.3f over covered pixels; %.3f%% of covered pixels differ by more than 8, %.3f%% by more than 32",
+                 maxDiff, Double(total) / Double(max(1, covered)), 100 * Double(over8) / Double(max(1, covered)), 100 * Double(over32) / Double(max(1, covered))))
+    if rest.count > 4 {
+        func flatten(_ rgba: [UInt8]) -> [UInt8] {
+            var out = rgba
+            for i in 0..<(cpu.width * cpu.height) {
+                let a = Int(rgba[i * 4 + 3])
+                for c in 0..<3 { out[i * 4 + c] = UInt8(min(255, Int(rgba[i * 4 + c]) + 96 * (255 - a) / 255)) }
+                out[i * 4 + 3] = 255
+            }
+            return out
+        }
+        var diff = [UInt8](repeating: 255, count: cpu.rgba.count)
+        for i in 0..<(cpu.width * cpu.height) {
+            var d = 0
+            for c in 0..<4 { d = max(d, abs(Int(cpu.rgba[i * 4 + c]) - Int(metal[i * 4 + c]))) }
+            let v = UInt8(min(255, d * 8))
+            diff[i * 4] = v; diff[i * 4 + 1] = 0; diff[i * 4 + 2] = 0
+        }
+        writePNG(flatten(cpu.rgba), width: cpu.width, height: cpu.height, to: URL(fileURLWithPath: rest[4] + "-cpu.png"))
+        writePNG(flatten(metal), width: cpu.width, height: cpu.height, to: URL(fileURLWithPath: rest[4] + "-metal.png"))
+        writePNG(diff, width: cpu.width, height: cpu.height, to: URL(fileURLWithPath: rest[4] + "-diff.png"))
+    }
+
+case "emoteinfo":
+    // emoteinfo <base> <model>: a model's variables, the parameters that read them, and its
+    // timelines (idle loops) with their tracks.
+    guard rest.count >= 2 else { fail("emoteinfo <base> <ca01_l_body_1>") }
+    let g = game(rest[0])
+    guard let renderer = EmoteCast(game: g).renderer(rest[1]) else { fail("no model \(rest[1])") }
+    let m = renderer.model
+    if let label = ProcessInfo.processInfo.environment["CS2_TIMELINE"],
+       let psb = try? PSBFile(psz: file(g, rest[1] + ".psz")) {
+        // The timeline as stored, for working out its frame types.
+        for t in psb.root["metadata"]?["timelineControl"]?.list ?? [] where t["label"]?.string == label {
+            print(t)
+        }
+    }
+    print("base \(m.baseObject)/\(m.baseMotion); \(m.objects.count) objects, \(m.objects.values.reduce(0) { $0 + $1.count }) motions")
+    var ranges: [String: (Double, Double, Bool)] = [:]
+    for (_, motions) in m.objects {
+        for (_, motion) in motions {
+            for p in motion.parameters {
+                let r = ranges[p.id] ?? (p.rangeBegin, p.rangeEnd, p.discrete)
+                ranges[p.id] = (min(r.0, p.rangeBegin, p.rangeEnd), max(r.1, p.rangeBegin, p.rangeEnd), r.2 || p.discrete)
+            }
+        }
+    }
+    let resting = m.restingVariables()
+    for name in m.variableNames {
+        let r = ranges[name].map { String(format: " range %g…%g%@", $0.0, $0.1, $0.2 ? " discrete" : "") } ?? ""
+        print("  \(name) = \(resting[name] ?? 0)\(r)")
+    }
+    var blends: [Int: Int] = [:], stencilDepth = 0, divisions: [Int: Int] = [:]
+    func walk(_ layer: EmoteModel.Layer, stencils: Int) {
+        for f in layer.frames { blends[f.content.blend, default: 0] += 1 }
+        divisions[layer.meshDivision, default: 0] += 1
+        let s = stencils + (layer.type == 12 && !layer.maskLabels.isEmpty ? 1 : 0)
+        stencilDepth = max(stencilDepth, s)
+        for c in layer.children { walk(c, stencils: s) }
+    }
+    for (_, motions) in m.objects { for (_, motion) in motions { for l in motion.layers { walk(l, stencils: 0) } } }
+    print("blend modes \(blends.sorted { $0.key < $1.key }); nested stencils up to \(stencilDepth) (within a motion); mesh divisions \(divisions.sorted { $0.key < $1.key })")
+    for s in m.selectors { print("selector \(s.label): \(s.options.map(\.label).joined(separator: ", "))") }
+    for (label, t) in m.timelines.sorted(by: { $0.key < $1.key }) {
+        print("timeline \(label) loop \(t.loopBegin)…\(t.loopEnd)\(t.difference ? " (difference)" : "")")
+        for (name, keys) in t.tracks.sorted(by: { $0.key < $1.key }) {
+            print("    \(name): " + keys.prefix(12).map { "\(Int($0.time))=\($0.value.map { String(format: "%g", $0) } ?? "-")\($0.weight != 1 ? String(format: "^%g", $0.weight) : "")" }.joined(separator: " ") + (keys.count > 12 ? " … (\(keys.count))" : ""))
+        }
+    }
 
 default:
     fail("unknown command \(command)")
