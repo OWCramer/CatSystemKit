@@ -10,7 +10,7 @@ import Foundation
 /// `wait N` for N frames, both resuming after the `wait`. `execfes name` starts a child
 /// script; the parent keeps running and reads `_EXITCODE_` (-1 while the child runs, then
 /// the code the child gave `exit`). Buttons run `#name.EVENT` blocks with `@` as their index.
-public final class FESPlayer {
+public final class FESPlayer: @unchecked Sendable {
     /// CS2_TRACE=1: every statement as it runs, on standard output.
     nonisolated(unsafe) static var trace = ProcessInfo.processInfo.environment["CS2_TRACE"] != nil
 
@@ -60,6 +60,7 @@ public final class FESPlayer {
     var root: FESInstance?
     private var base: [UInt8]?
     private var images: [String: HGImage] = [:]
+    private let imageLock = NSLock()
     private var randomState: UInt32 = 12345
     private var reported: Set<String> = []
 
@@ -215,15 +216,35 @@ public final class FESPlayer {
 
     func picture(_ file: String) -> HGImage? {
         let name = file.replacingOccurrences(of: "%LANG%", with: language).lowercased()
-        if let cached = images[name] { return cached }
-        guard let bytes = try? game.file(named: name.hasSuffix(".hg3") ? name : name + ".hg3"),
-              let image = try? HGImage(bytes)
-        else {
+        if let cached = imageLock.withLock({ images[name] }) { return cached }
+        guard let image = Self.decode(name, game: game) else {
             noteOnce("missing picture \(name)")
             return nil
         }
-        images[name] = image
+        imageLock.withLock { images[name] = image }
         return image
+    }
+
+    private static func decode(_ name: String, game: CatSystemGame) -> HGImage? {
+        guard let bytes = try? game.file(named: name.hasSuffix(".hg3") ? name : name + ".hg3") else { return nil }
+        return try? HGImage(bytes)
+    }
+
+    /// Decodes the pictures the scripts' `#PRELOAD` lists name (in this language), so a
+    /// screen doesn't stop to decode them when it appears. Safe to call from another thread
+    /// while the scripts run (it only fills the picture cache).
+    public func preload(scripts: [String]) {
+        let others = ["jp", "en", "cn"].filter { $0 != language }
+        for script in scripts {
+            guard let bytes = try? game.file(named: script + ".fes"), let text = try? FESScript.text(bytes) else { continue }
+            for raw in FESProgram(text: text).preload {
+                let name = raw.replacingOccurrences(of: "%LANG%", with: language).lowercased()
+                if others.contains(where: { name.hasSuffix("_" + $0) }) { continue }
+                if imageLock.withLock({ images[name] != nil }) { continue }
+                guard let image = Self.decode(name, game: game) else { continue }
+                imageLock.withLock { if images[name] == nil { images[name] = image } }
+            }
+        }
     }
 
     /// The screen as straight RGBA: the `baseimg` snapshot, then shown objects by priority

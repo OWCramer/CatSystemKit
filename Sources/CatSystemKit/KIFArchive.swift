@@ -108,6 +108,29 @@ public final class KIFArchive: @unchecked Sendable {
         return bytes
     }
 
+    /// Part of an entry, deciphered: `count` bytes from `offset` (clipped to the entry). The
+    /// cipher works on whole 8-byte blocks from the entry's start (a short last block is
+    /// stored plain), so a large entry (a movie) can be read a piece at a time, in memory.
+    public func read(_ entry: Entry, at offset: Int, count: Int) throws -> [UInt8] {
+        let start = max(0, min(offset, entry.size)), end = max(start, min(entry.size, offset + count))
+        guard end > start else { return [] }
+        let blockStart = start / 8 * 8
+        let whole = entry.size / 8 * 8
+        let blockEnd = min(entry.size, end <= whole ? (end + 7) / 8 * 8 : entry.size)
+        lock.lock()
+        defer { lock.unlock() }
+        var bytes = try Self.read(handle, at: entry.offset + UInt64(blockStart), count: blockEnd - blockStart, url: url)
+        if let cipher {
+            let cipheredEnd = min(blockEnd, whole) - blockStart
+            if cipheredEnd > 0 {
+                var head = Array(bytes[0..<cipheredEnd])
+                cipher.decipher(&head)
+                bytes.replaceSubrange(0..<cipheredEnd, with: head)
+            }
+        }
+        return Array(bytes[(start - blockStart)..<(end - blockStart)])
+    }
+
     /// The first bytes of an entry, deciphered (rounded up to a whole block).
     public func head(of entry: Entry, count: Int = 16) throws -> [UInt8] {
         let n = min(entry.size, (count + 7) / 8 * 8)

@@ -28,6 +28,8 @@ public struct FESProgram: Sendable {
     public let tables: [Table]
     public let blocks: [String: [String]]
     public let labelOrder: [String]
+    /// The pictures `#PRELOAD` lists (loaded before the screen shows, in the game).
+    public let preload: [String]
 
     public init(text: String) {
         var macros: [String: String] = [:]
@@ -35,8 +37,9 @@ public struct FESProgram: Sendable {
         var tables: [Table] = []
         var blocks: [String: [String]] = [:]
         var labelOrder: [String] = []
+        var preload: [String] = []
 
-        enum Section { case macro, subcommand, define, object([String]), ignore, block(String) }
+        enum Section { case macro, subcommand, define, object([String]), preload, ignore, block(String) }
         var section = Section.ignore
         var rows: [(String, [String])] = []
         func closeTable() {
@@ -55,7 +58,8 @@ public struct FESProgram: Sendable {
                 case "SUBCOMMAND": section = .subcommand
                 case "DEFINE": section = .define
                 case "OBJECT": section = .object(Array(words.dropFirst()))
-                case "PRELOAD", "KEYBLOCK": section = .ignore
+                case "PRELOAD": section = .preload
+                case "KEYBLOCK": section = .ignore
                 default:
                     section = .block(head)
                     if blocks[head] == nil { labelOrder.append(head) }
@@ -80,6 +84,8 @@ public struct FESProgram: Sendable {
                 if let first = words.first { rows.append((first, Array(words.dropFirst()))) }
             case .block(let label):
                 blocks[label, default: []].append(line)
+            case .preload:
+                if let first = words.first { preload.append(first) }
             case .subcommand, .ignore:
                 break
             }
@@ -90,5 +96,6 @@ public struct FESProgram: Sendable {
         self.tables = tables
         self.blocks = blocks
         self.labelOrder = labelOrder
+        self.preload = preload
     }
 }

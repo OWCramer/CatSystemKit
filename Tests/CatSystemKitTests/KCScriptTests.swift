@@ -171,7 +171,7 @@ private func run(_ asm: Assembler, strings: [(address: Int, text: String)] = [])
 // MARK: Scenes
 
 /// A CatScene file stored uncompressed: lines of (type, text).
-private func sceneFile(_ lines: [(UInt8, String)]) -> [UInt8] {
+func sceneFile(_ lines: [(UInt8, String)]) -> [UInt8] {
     var offsets: [UInt8] = [], strings: [UInt8] = []
     for (type, text) in lines {
         offsets += le32(UInt32(strings.count))

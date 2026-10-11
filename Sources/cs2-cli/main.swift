@@ -247,6 +247,31 @@ case "raw":
     guard rest.count >= 3 else { fail("raw <base> <file> <out>") }
     do { try Data(file(game(rest[0]), rest[1])).write(to: URL(fileURLWithPath: rest[2])) } catch { fail("\(error)") }
 
+case "names":
+    // Every file name, archive by archive (names unscrambled with the game's key).
+    guard let path = rest.first else { fail("names <base> [archive]") }
+    for kif in game(path).archives where rest.count < 2 || kif.url.lastPathComponent == rest[1] {
+        for e in kif.entries { print(kif.url.lastPathComponent, e.name, e.size, separator: "\t") }
+    }
+
+case "streamcheck":
+    // Reads a file in odd-sized pieces (as the movie player does) and compares them with the
+    // whole file read at once.
+    guard rest.count >= 2 else { fail("streamcheck <base> <file>") }
+    let g = game(rest[0])
+    let whole = file(g, rest[1])
+    guard let stream = g.stream(named: rest[1]) else { fail("no file \(rest[1])") }
+    var offset = 0, pieces = 0, bad = 0
+    var generator = SystemRandomNumberGenerator()
+    while offset < stream.size {
+        let count = Int.random(in: 1...70_000, using: &generator)
+        let piece = stream.read(offset, count) ?? []
+        if !piece.elementsEqual(whole[offset..<min(whole.count, offset + count)]) { bad += 1 }
+        offset += count
+        pieces += 1
+    }
+    print("\(stream.size) bytes in \(pieces) pieces, \(bad) differ")
+
 case "kcs":
     // Disassembly, optionally only [from, to) (hex addresses).
     guard rest.count >= 2 else { fail("kcs <base> <name.kcs>|all [from] [to]") }

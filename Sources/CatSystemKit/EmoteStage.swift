@@ -105,6 +105,9 @@ public final class EmoteStage {
         /// `m2prmscale`: percent of the named variables' pose values.
         var parameterScales: [String: Double] = [:]
         var arc: (start: Double, frames: Double, from: Double, to: Double, x: Double, y: Double)?
+        /// `quake f,x,y …`: offsets in turn; `shake frames amplitude … count`: a bounce.
+        var quake: PlaneStage.Quake?
+        var shake: (start: Double, frames: Double, amplitude: Double, count: Double)?
         /// Inertia variables: displacement and velocity.
         var springs: [String: (x: Double, v: Double)] = [:]
         /// What moved them last frame: the pose variables and the position.
@@ -217,6 +220,11 @@ public final class EmoteStage {
         guard words.first == "mpl" || words.first == "fmpl" else { return }
         let frame = time * Self.framesPerSecond
         guard words.count >= 2 else { actors = [:]; return }
+        // `mpl quake …` without a bank shakes every character (with `pl quake`: the screen).
+        if words[1] == "quake" || words[1] == "mcquake" {
+            for a in actors.values { a.quake = PlaneStage.Quake(Array(words.dropFirst(2)), start: frame) }
+            return
+        }
         let banks = ScenePlayer.planeNumbers(words[1])
         let args = Array(words.dropFirst(2))
         for n in banks {
@@ -254,6 +262,15 @@ public final class EmoteStage {
                 // `arc frames fromDegrees toDegrees x y`: a hop along a sine.
                 if let frames = number(1), let from = number(2), let to = number(3) {
                     a.arc = (frame, frames, from, to, number(4) ?? 0, number(5) ?? 0)
+                }
+            case "quake", "mcquake":
+                a.quake = PlaneStage.Quake(Array(args.dropFirst()), start: frame)
+            case "shake", "mcshake":
+                // `shake frames amplitude [mode] [count]`: as the game has it the character
+                // bobs (a glad hop, a nod); a decaying vertical bounce, `count` times.
+                if let frames = number(1), let amplitude = number(2) {
+                    let count = args.count >= 5 ? number(4) ?? 1 : args.count == 4 ? number(3) ?? 1 : 1
+                    a.shake = (frame, max(1, frames), amplitude, max(1, count))
                 }
             case "m2body":
                 setPose(a, c, frame: frame, animate: true)
@@ -393,6 +410,17 @@ public final class EmoteStage {
                     y -= arc.y * s
                 }
             }
+            if let quake = a.quake {
+                if let o = quake.offset(at: frame) { x += o.x; y += o.y } else { a.quake = nil }
+            }
+            if let shake = a.shake {
+                let t = (frame - shake.start) / shake.frames
+                if t >= 1 {
+                    a.shake = nil
+                } else if t >= 0 {
+                    y -= shake.amplitude * abs(sin(t * shake.count * .pi)) * (1 - t * 0.5)
+                }
+            }
             if physicsEnabled { inertia(a, pose: pose, variables: &v, x: x, y: y, frame: frame) }
             renderer.model.applySelectors(&v)
             let mx = a.scaleX.value(at: frame) / 100, my = a.scaleY.value(at: frame) / 100
@@ -410,7 +438,7 @@ public final class EmoteStage {
     public func isMoving(at time: Double) -> Bool {
         let frame = time * Self.framesPerSecond
         return actors.values.contains { a in
-            a.arc != nil || !a.x.done(at: frame) || !a.y.done(at: frame) || !a.alpha.done(at: frame)
+            a.arc != nil || a.quake != nil || a.shake != nil || !a.x.done(at: frame) || !a.y.done(at: frame) || !a.alpha.done(at: frame)
                 || a.variables.values.contains { !$0.done(at: frame) }
         }
     }
@@ -422,6 +450,8 @@ public final class EmoteStage {
             a.scaleX.snap(a.scaleX.to); a.scaleY.snap(a.scaleY.to)
             for (k, t) in a.variables { a.variables[k] = Tween(t.to) }
             a.arc = nil
+            a.quake = nil
+            a.shake = nil
         }
     }
 }

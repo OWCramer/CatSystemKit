@@ -53,6 +53,24 @@ public final class ScenePlayer {
         public var baseY: Int?
         public var alpha = 255
         public var visible = true
+        /// `pl N scale` in percent (nil: 100), about the plane's anchor (its base point's
+        /// place, else the screen's centre).
+        public var scaleX: Int?
+        public var scaleY: Int?
+
+        /// The point the picture's base point goes to (its scale's centre; the screen's centre
+        /// unless the plane was placed), and where its top-left corner goes, for a frame with
+        /// this base point on a canvas this size. A picture without a base point (backgrounds,
+        /// CGs) is placed by its canvas's centre: `pl 0 pos 640 360` is where it stands
+        /// anyway, `pos 640 260` raises it 100 pixels.
+        public func placement(baseX frameBaseX: Int, baseY frameBaseY: Int, canvasWidth: Int, canvasHeight: Int,
+                              width: Int, height: Int) -> (anchorX: Int, anchorY: Int, originX: Int, originY: Int) {
+            let framed = frameBaseX != 0 || frameBaseY != 0
+            let bx = baseX ?? (framed ? frameBaseX : (canvasWidth > 0 ? canvasWidth : width) / 2)
+            let by = baseY ?? (framed ? frameBaseY : (canvasHeight > 0 ? canvasHeight : height) / 2)
+            let ax = x ?? width / 2, ay = y ?? height / 2
+            return (ax, ay, ax - bx, ay - by)
+        }
     }
 
     /// An E-mote character on screen (`mpl` bank N).
@@ -381,14 +399,15 @@ public final class ScenePlayer {
         var plane = planes[n] ?? Plane(kind: kind)
         let word = args[1]
         if let color = Self.color(word) {
-            plane = Plane(kind: kind, color: color)
+            plane = Plane(kind: kind, color: color, scaleX: plane.scaleX, scaleY: plane.scaleY)
         } else if word == "pos", args.count >= 4 {
             plane.x = coordinate(args[2]) ?? plane.x
             plane.y = coordinate(args[3]) ?? plane.y
         } else if ["scale", "amove1", "amove2", "amove3", "mode", "fade", "rot"].contains(word) {
             // Motions and effects: recorded, not applied.
         } else {
-            plane = Plane(kind: kind, file: word)
+            // A new picture keeps the plane's place and scale (`pl 0 scale 150%` comes first).
+            plane = Plane(kind: kind, file: word, x: plane.x, y: plane.y, scaleX: plane.scaleX, scaleY: plane.scaleY)
             if args.count >= 4 {
                 plane.x = coordinate(args[2])
                 plane.y = coordinate(args[3])
@@ -398,7 +417,7 @@ public final class ScenePlayer {
     }
 
     /// Plane numbers: `N`, `[a-b]` or `[a,b,…]`.
-    static func planeNumbers(_ text: String) -> [Int] {
+    public static func planeNumbers(_ text: String) -> [Int] {
         if text.hasPrefix("["), text.hasSuffix("]") {
             var out: [Int] = []
             for part in text.dropFirst().dropLast().split(separator: ",") {
@@ -441,6 +460,17 @@ public final class ScenePlayer {
                 case "base" where args.count >= 4:
                     plane.baseX = coordinate(args[2]) ?? plane.baseX
                     plane.baseY = coordinate(args[3]) ?? plane.baseY
+                case "scale" where args.count >= 3:
+                    plane.scaleX = Self.percent(args[2]) ?? plane.scaleX
+                    plane.scaleY = args.count >= 4 ? Self.percent(args[3]) ?? plane.scaleX : plane.scaleX
+                case "ascale1", "ascale2", "ascale3":
+                    // `ascale1 frames x% y%`: the end of the motion (`PlaneStage` plays it).
+                    if args.count >= 4 { plane.scaleX = Self.percent(args[3]) ?? plane.scaleX }
+                    if args.count >= 5 { plane.scaleY = Self.percent(args[4]) ?? plane.scaleY }
+                case "amove1", "amove2", "amove3", "move":
+                    // `amove1 frames x y`, `@` unchanged, `@+n` relative: the end point.
+                    if args.count >= 4 { plane.x = characterCoordinate(args[3], current: plane.x, fallback: 640) }
+                    if args.count >= 5 { plane.y = characterCoordinate(args[4], current: plane.y, fallback: 360) }
                 default: break
                 }
             }
@@ -570,10 +600,12 @@ public final class ScenePlayer {
             if let color = plane.color {
                 canvas.fill(x: 0, y: 0, w: width, h: height, color: color, alpha: plane.alpha)
             } else if let file = plane.file, let image = pictures(file), let frame = image.frames.first {
-                let hasBase = (plane.baseX ?? frame.baseX) != 0 || (plane.baseY ?? frame.baseY) != 0
-                let originX = hasBase ? (plane.x ?? width / 2) - (plane.baseX ?? frame.baseX) : (plane.x ?? 0)
-                let originY = hasBase ? (plane.y ?? height / 2) - (plane.baseY ?? frame.baseY) : (plane.y ?? 0)
-                canvas.blit(frame, x: originX + frame.offsetX, y: originY + frame.offsetY, alpha: plane.alpha)
+                let at = plane.placement(baseX: frame.baseX, baseY: frame.baseY, canvasWidth: frame.canvasWidth,
+                                         canvasHeight: frame.canvasHeight, width: width, height: height)
+                let sx = Double(plane.scaleX ?? 100) / 100, sy = Double(plane.scaleY ?? plane.scaleX ?? 100) / 100
+                canvas.blit(frame, x: Double(at.anchorX) + Double(at.originX + frame.offsetX - at.anchorX) * sx,
+                            y: Double(at.anchorY) + Double(at.originY + frame.offsetY - at.anchorY) * sy,
+                            scaleX: sx, scaleY: sy, alpha: plane.alpha)
             }
         }
         if !charactersDrawn { drawCharacters() }

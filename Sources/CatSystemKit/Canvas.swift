@@ -83,4 +83,36 @@ struct Canvas {
             }
         }
     }
+
+    /// An HG-3 frame scaled by (`sx`, `sy`) with its top-left corner at (x, y), sampled
+    /// nearest (headless pictures of zoomed scenes).
+    mutating func blit(_ frame: HGImage.Frame, x: Double, y: Double, scaleX sx: Double, scaleY sy: Double, alpha: Int) {
+        guard sx > 0, sy > 0 else { return }
+        if abs(sx - 1) < 0.0001, abs(sy - 1) < 0.0001 {
+            blit(frame, x: Int(x.rounded()), y: Int(y.rounded()), alpha: alpha)
+            return
+        }
+        let x0 = max(0, Int(x.rounded(.down))), x1 = min(width, Int((x + Double(frame.width) * sx).rounded(.up)))
+        let y0 = max(0, Int(y.rounded(.down))), y1 = min(height, Int((y + Double(frame.height) * sy).rounded(.up)))
+        guard x0 < x1, y0 < y1 else { return }
+        let w = width
+        frame.rgba.withUnsafeBufferPointer { src in
+            pixels.withUnsafeMutableBufferPointer { dst in
+                for yy in y0..<y1 {
+                    let fy = Int((Double(yy) + 0.5 - y) / sy)
+                    guard fy >= 0, fy < frame.height else { continue }
+                    for xx in x0..<x1 {
+                        let fx = Int((Double(xx) + 0.5 - x) / sx)
+                        guard fx >= 0, fx < frame.width else { continue }
+                        let s = (fy * frame.width + fx) * 4
+                        let a = Int(src[s + 3]) * alpha / 255
+                        guard a > 0 else { continue }
+                        let d = (yy * w + xx) * 4
+                        for c in 0..<3 { dst[d + c] = UInt8((Int(src[s + c]) * a + Int(dst[d + c]) * (255 - a)) / 255) }
+                        dst[d + 3] = UInt8(a + Int(dst[d + 3]) * (255 - a) / 255)
+                    }
+                }
+            }
+        }
+    }
 }

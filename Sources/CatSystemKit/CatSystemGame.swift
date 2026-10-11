@@ -70,6 +70,14 @@ public final class CatSystemGame: @unchecked Sendable {
 
     public func contains(_ name: String) -> Bool { index[name.lowercased()] != nil }
 
+    /// A file read a piece at a time (a movie of 130 MB), deciphered in memory: its size, and
+    /// a reader of `count` bytes from an offset.
+    public func stream(named name: String) -> (size: Int, read: @Sendable (Int, Int) -> [UInt8]?)? {
+        guard let hit = index[name.lowercased()] else { return nil }
+        let archive = archives[hit.archive], entry = hit.entry
+        return (entry.size, { offset, count in try? archive.read(entry, at: offset, count: count) })
+    }
+
     /// Every file name with the given extension, sorted.
     public func names(withExtension ext: String) -> [String] {
         archives.flatMap(\.entries).map(\.name)

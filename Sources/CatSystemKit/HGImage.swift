@@ -259,3 +259,31 @@ struct BitReader {
         return value
     }
 }
+
+extension HGImage.Frame {
+    /// The pixels premultiplied by their alpha (for a GPU texture blended "over").
+    public func premultipliedRGBA() -> [UInt8] {
+        var out = rgba
+        out.withUnsafeMutableBufferPointer { p in
+            for i in stride(from: 0, to: p.count - 3, by: 4) {
+                let a = UInt16(p[i + 3])
+                if a == 255 { continue }
+                p[i] = UInt8((UInt16(p[i]) * a + 127) / 255)
+                p[i + 1] = UInt8((UInt16(p[i + 1]) * a + 127) / 255)
+                p[i + 2] = UInt8((UInt16(p[i + 2]) * a + 127) / 255)
+            }
+        }
+        return out
+    }
+
+    /// The red channel alone (a rule picture's grey levels), one byte a pixel.
+    public func redPlane() -> [UInt8] {
+        var out = [UInt8](repeating: 0, count: width * height)
+        rgba.withUnsafeBufferPointer { p in
+            out.withUnsafeMutableBufferPointer { o in
+                for i in 0..<min(o.count, p.count / 4) { o[i] = p[i * 4] }
+            }
+        }
+        return out
+    }
+}
