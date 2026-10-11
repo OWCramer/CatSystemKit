@@ -19,7 +19,7 @@ public struct EmoteImage: Sendable {
 /// moved by its transform. Layers draw in their motion's priority order (a referenced
 /// motion draws where its layer stands), and stencils clip their descendants to the
 /// coverage of their mask layers.
-public final class EmoteRenderer {
+public final class EmoteRenderer: @unchecked Sendable {
     public let model: EmoteModel
 
     public init(model: EmoteModel) {

@@ -58,3 +58,53 @@ import Testing
     try player.execute("mpl")
     #expect(player.cast.isEmpty)
 }
+
+@Test func profilesReadBlinksLipSyncChainsAndIdles() {
+    let texts: [String: String] = [
+        "m2view.cnf": "#profile\nca01\t\tca01.pfl\n",
+        "ca01.pfl": "#charaname\n1\tbody\tca01_l_body_1\n#motname\n1\t0\t差分用_waiting_loop\tca_m.dif\tbody.dif\n1\t1\tloop2\tca_m.dif\tbody.dif\n",
+        "ca_m.dif": "#include\nca01.inc\n",
+        "ca01.inc": """
+        #pattern
+        %1 1 1
+        face_mouth 0
+        %1 2 2
+        face_mouth 10
+        %2 1 1
+        face_eye_open 0
+        %2 2 2
+        face_eye_open 10
+        #chain
+        1\tfix\t1
+        2\t$eye
+        $eye
+        default\tfix
+        frame\t1
+        1\t2\tlinear\t10
+        #blink
+        2 1 0 10 10 120 480
+        #lip_table
+        1 1 linear 50 700 0 0 1 2 3 4 5 6
+        #lip_variable
+        1 1 face_talk
+        """,
+        "body.dif": "#pattern\n%1 1 std default\nhead_LR 0\n%1 2 left\nhead_LR -30\n#chain\n1\tsin_fs\t30\n",
+    ]
+    let profiles = EmoteProfiles(files: { texts[$0].map { Array($0.utf8) } })
+    let a = profiles.pose("ca01,1,1,1:1", body: ["1"])!
+    let b = profiles.pose("ca01,1,2,2", body: ["2"])!
+    #expect(a.idle == "loop2" && b.idle == "差分用_waiting_loop")
+    #expect(a.blink?.frames == 10 && a.blink?.maxWait == 480 && b.blink == nil)
+    #expect(a.lip?.levels.count == 8 && a.lip?.variable == "face_talk" && b.lip == nil)
+    let t = b.transitions(from: a)
+    #expect(t["face_mouth"]?.curve == "fix")
+    #expect(t["face_eye_open"]?.curve == "linear" && t["face_eye_open"]?.frames == 10)
+    #expect(t["head_LR"]?.curve == "sin_fs" && t["head_LR"]?.frames == 30)
+    // Back from 2 to 1 isn't in the table: the default, at once.
+    #expect(a.transitions(from: b)["face_eye_open"]?.curve == "fix")
+}
+
+@Test func levelFilesAreFloatsPerFrame() {
+    let bytes = [Float(0.5), 4.25].flatMap { v in withUnsafeBytes(of: v.bitPattern.littleEndian) { Array($0) } }
+    #expect(EmoteStage.levels(bytes) == [0.5, 4.25])
+}

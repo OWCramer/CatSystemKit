@@ -6,11 +6,13 @@ struct Canvas {
     let height: Int
     var pixels: [UInt8]
 
-    init(width: Int, height: Int) {
+    /// Black, or clear (`transparent`: then the pixels end up premultiplied, as every blend
+    /// below is "over" in premultiplied terms and keeps alpha up to date).
+    init(width: Int, height: Int, transparent: Bool = false) {
         self.width = width
         self.height = height
         pixels = [UInt8](repeating: 0, count: width * height * 4)
-        for i in stride(from: 3, to: pixels.count, by: 4) { pixels[i] = 255 }
+        if !transparent { for i in stride(from: 3, to: pixels.count, by: 4) { pixels[i] = 255 } }
     }
 
     init(width: Int, height: Int, pixels: [UInt8]) {
@@ -30,6 +32,7 @@ struct Canvas {
                 pixels[o] = UInt8((r * a + Int(pixels[o]) * (255 - a)) / 255)
                 pixels[o + 1] = UInt8((g * a + Int(pixels[o + 1]) * (255 - a)) / 255)
                 pixels[o + 2] = UInt8((b * a + Int(pixels[o + 2]) * (255 - a)) / 255)
+                pixels[o + 3] = UInt8(a + Int(pixels[o + 3]) * (255 - a) / 255)
             }
         }
     }
@@ -52,6 +55,7 @@ struct Canvas {
                             let value = Int(src[s + c]) * alpha / 255 + Int(dst[d + c]) * (255 - a) / 255
                             dst[d + c] = UInt8(min(255, value))
                         }
+                        dst[d + 3] = UInt8(min(255, a + Int(dst[d + 3]) * (255 - a) / 255))
                     }
                 }
             }
@@ -73,6 +77,7 @@ struct Canvas {
                         guard a > 0 else { continue }
                         let d = (yy * w + xx) * 4
                         for c in 0..<3 { dst[d + c] = UInt8((Int(src[s + c]) * a + Int(dst[d + c]) * (255 - a)) / 255) }
+                        dst[d + 3] = UInt8(a + Int(dst[d + 3]) * (255 - a) / 255)
                     }
                 }
             }

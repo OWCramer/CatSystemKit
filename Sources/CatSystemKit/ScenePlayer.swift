@@ -530,8 +530,17 @@ public final class ScenePlayer {
     /// characters (drawn by `emote`) over the background, in bank order.
     public func render(width: Int, height: Int, emote: EmoteCast? = nil,
                        pictures: (String) -> HGImage?) -> [UInt8] {
-        var canvas = Canvas(width: width, height: height)
-        let order = planes.keys.sorted()
+        render(width: width, height: height, layer: .all, emote: emote, pictures: pictures)
+    }
+
+    /// Which planes `render` draws: all of them, those under the characters (plane 0 and
+    /// below: opaque) or those over them (above 0: premultiplied, clear where empty).
+    public enum Layer: Sendable { case all, below, above }
+
+    public func render(width: Int, height: Int, layer: Layer, emote: EmoteCast? = nil,
+                       pictures: (String) -> HGImage?) -> [UInt8] {
+        var canvas = Canvas(width: width, height: height, transparent: layer == .above)
+        let order = planes.keys.sorted().filter { layer == .all || (layer == .below) == ($0 <= 0) }
         var charactersDrawn = false
         func drawCharacters() {
             charactersDrawn = true

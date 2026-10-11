@@ -19,33 +19,94 @@ import Foundation
 /// `.inc` pattern (cheek, mouth, eyes, tears, eyebrows, highlight); a `:` after the last
 /// digit picks the idle motion, not used here.
 public final class EmoteProfiles {
-    public struct Pattern {
+    public struct Pattern: Sendable {
         public var assignments: [(String, Double)] = []
         public var isDefault = false
     }
 
-    public struct Expressions {
+    /// `#blink`: while digit `digit` shows `code`, the eyes blink every `minWait`…`maxWait`
+    /// frames, `face_eye_open` going from `from` to `to` and back in `frames`.
+    public struct Blink: Sendable {
+        public var digit: Int, code: String
+        public var from: Double, to: Double, frames: Double
+        public var minWait: Double, maxWait: Double
+    }
+
+    /// `#lip_table`: while digit `digit` shows `code` and a voice plays, its level (the `.lv`
+    /// files' values ×100) between `low` and `high` picks one of `levels` for the lip
+    /// variable (`#lip_variable`, `face_talk`), linearly between them.
+    public struct Lip: Sendable {
+        public var digit: Int, code: String
+        public var low: Double, high: Double
+        public var levels: [Double]
+        public var variable: String
+    }
+
+    /// `#chain`: how a digit's variables move when its code changes: `fix` (at once),
+    /// `linear` or `sin_fs` (easing out) over `frames`; `pairs` (`from>to`) override that per
+    /// change, from a `$table`.
+    public struct Chain: Sendable {
+        public var curve = "fix"
+        public var frames = 1.0
+        public var pairs: [String: (curve: String, frames: Double)] = [:]
+    }
+
+    public struct Expressions: Sendable {
         public var scaleX = 1.0, scaleY = 1.0
         public var positionX = 0.0, positionY = 0.0
         public var scaleOffsetX = 0.0, scaleOffsetY = 0.0
         public var defaults: [String: Double] = [:]
         /// Digit → code → pattern.
         public var patterns: [Int: [String: Pattern]] = [:]
+        public var blinks: [Blink] = []
+        public var lips: [Lip] = []
+        public var chains: [Int: Chain] = [:]
     }
 
     public struct Profile {
         public var bodies: [Int: String] = [:]
         public var expressions: [Int: String] = [:]
         public var bodyFile: String?
+        /// Body → idle number (the `:n` after a scene's digits) → timeline label.
+        public var idles: [Int: [Int: String]] = [:]
     }
 
     /// What `mpl N model,…` asks for: the PSB, its variables and its placement.
-    public struct Pose {
+    public struct Pose: Sendable {
         public let model: String
         public let variables: [String: Double]
         public let scaleX: Double, scaleY: Double
         public let positionX: Double, positionY: Double
         public let scaleOffsetX: Double, scaleOffsetY: Double
+        /// The expression digits' codes (digit → code) and `m2body`'s.
+        public var codes: [Int: String] = [:]
+        public var bodyCodes: [Int: String] = [:]
+        /// The idle timeline (`差分用_waiting_loop` …), or nil for none.
+        public var idle: String?
+        /// The expression file's settings (blinks, lip sync, chains) and the body file's.
+        public var face = Expressions()
+        public var body = Expressions()
+
+        /// The blink for the eyes shown, if they blink.
+        public var blink: Blink? { face.blinks.first { codes[$0.digit] == $0.code } }
+        /// The lip sync for the mouth shown, if it has one.
+        public var lip: Lip? { face.lips.first { codes[$0.digit] == $0.code } }
+
+        /// How each variable that differs between `old` and this pose gets here: the chain
+        /// of the digit whose code changed (curve and frames; `fix` is at once).
+        public func transitions(from old: Pose) -> [String: (curve: String, frames: Double)] {
+            var out: [String: (curve: String, frames: Double)] = [:]
+            for (file, oldCodes, newCodes) in [(face, old.codes, codes), (body, old.bodyCodes, bodyCodes)] {
+                for (digit, code) in newCodes where oldCodes[digit] != code {
+                    let chain = file.chains[digit] ?? Chain()
+                    let rule = oldCodes[digit].flatMap { chain.pairs[$0 + ">" + code] } ?? (chain.curve, chain.frames)
+                    var names = Set((file.patterns[digit]?[code]?.assignments ?? []).map(\.0))
+                    if let previous = oldCodes[digit] { names.formUnion((file.patterns[digit]?[previous]?.assignments ?? []).map(\.0)) }
+                    for name in names { out[name] = rule }
+                }
+            }
+            return out
+        }
     }
 
     private let files: (String) -> [UInt8]?
@@ -114,7 +175,10 @@ public final class EmoteProfiles {
             if let n = Int(n), let psb = rest.last { p.bodies[n] = psb }
         }
         for (n, rest) in s["motname"] ?? [] {
-            guard let n = Int(n), p.expressions[n] == nil else { continue }
+            guard let n = Int(n) else { continue }
+            // `1 0 差分用_waiting_loop ca_m.dif body.dif`: body 1's idle 0.
+            if rest.count >= 2, let idle = Int(rest[0]) { p.idles[n, default: [:]][idle] = rest[1] }
+            guard p.expressions[n] == nil else { continue }
             let difs = rest.filter { $0.lowercased().hasSuffix(".dif") }
             if let first = difs.first { p.expressions[n] = first }
             if difs.count > 1 { p.bodyFile = difs[1] }
@@ -155,6 +219,47 @@ public final class EmoteProfiles {
                 e.patterns[d]?[code]?.assignments.append((first, v))
             }
         }
+        // `#blink`: digit code from to speed minWait maxWait.
+        for (first, rest) in s["blink"] ?? [] {
+            guard let d = Int(first), rest.count >= 6 else { continue }
+            let n = rest.dropFirst().compactMap(Double.init)
+            guard n.count >= 5 else { continue }
+            e.blinks.append(Blink(digit: d, code: rest[0].lowercased(), from: n[0], to: n[1], frames: n[2], minWait: n[3], maxWait: n[4]))
+        }
+        // `#lip_variable`: digit code variable; `#lip_table`: digit code curve low high levels…
+        var lipVariables: [String: String] = [:]
+        for (first, rest) in s["lip_variable"] ?? [] where rest.count >= 2 { lipVariables[first + ":" + rest[0].lowercased()] = rest[1] }
+        for (first, rest) in s["lip_table"] ?? [] {
+            guard let d = Int(first), rest.count >= 5, let low = Double(rest[2]), let high = Double(rest[3]) else { continue }
+            let code = rest[0].lowercased()
+            e.lips.append(Lip(digit: d, code: code, low: low, high: high, levels: rest.dropFirst(4).compactMap(Double.init),
+                              variable: lipVariables[first + ":" + code] ?? "face_talk"))
+        }
+        // `#chain`: `digit curve frames` or `digit $table`, then the tables: `$name`,
+        // `default curve`, `frame n`, `from to curve frames`.
+        var tables: [String: Chain] = [:]
+        var tableDigits: [Int: String] = [:]
+        var table: String?
+        for (first, rest) in s["chain"] ?? [] {
+            if first.hasPrefix("$"), rest.isEmpty {
+                table = first
+                tables[first] = Chain()
+            } else if let t = table {
+                switch first {
+                case "default": tables[t]?.curve = rest.first ?? "fix"
+                case "frame": tables[t]?.frames = rest.first.flatMap(Double.init) ?? 1
+                default:
+                    if rest.count >= 3, let frames = Double(rest[2]) { tables[t]?.pairs[first.lowercased() + ">" + rest[0].lowercased()] = (rest[1], frames) }
+                }
+            } else if let d = Int(first), let curve = rest.first {
+                if curve.hasPrefix("$") {
+                    tableDigits[d] = curve
+                } else {
+                    e.chains[d] = Chain(curve: curve, frames: rest.count > 1 ? Double(rest[1]) ?? 1 : 1)
+                }
+            }
+        }
+        for (d, name) in tableDigits { if let t = tables[name] { e.chains[d] = t } }
     }
 
     /// The pose for `spec` (`ca01,1,1,b,3,0,4,0:0`) and `m2body` digits (`1,2,1,1,1,1`; `@`
@@ -170,23 +275,46 @@ public final class EmoteProfiles {
         // Each digit's default pattern, then the scene's digits.
         for (_, codes) in face.patterns { for (_, p) in codes where p.isDefault { for (k, v) in p.assignments { variables[k] = v } } }
         var digits = Array(fields.dropFirst(2))
-        if let last = digits.last, let colon = last.firstIndex(of: ":") { digits[digits.count - 1] = String(last[..<colon]) }
+        var idleNumber = 0
+        if let last = digits.last, let colon = last.firstIndex(of: ":") {
+            digits[digits.count - 1] = String(last[..<colon])
+            idleNumber = Int(last[last.index(after: colon)...]) ?? 0
+        }
+        var codes: [Int: String] = [:]
+        for (digit, digitCodes) in face.patterns {
+            if let d = digitCodes.first(where: { $0.value.isDefault })?.key { codes[digit] = d }
+        }
         for (i, code) in digits.enumerated() {
             guard let p = face.patterns[i + 1]?[code.lowercased()] else { continue }
+            codes[i + 1] = code.lowercased()
             for (k, v) in p.assignments { variables[k] = v }
         }
         // `face_talk 1` marks a talking mouth (lip sync from the voice); at rest it is shut.
         if variables["face_talk"] != nil { variables["face_talk"] = 0 }
+        var bodyCodes: [Int: String] = [:]
+        var b = Expressions()
         if let bodyFile = profile.bodyFile {
-            let b = expressions(bodyFile)
-            for (_, codes) in b.patterns { for (_, p) in codes where p.isDefault { for (k, v) in p.assignments { variables[k] = v } } }
+            b = expressions(bodyFile)
+            for (digit, digitCodes) in b.patterns {
+                for (code, p) in digitCodes where p.isDefault {
+                    bodyCodes[digit] = code
+                    for (k, v) in p.assignments { variables[k] = v }
+                }
+            }
             for (i, code) in body.enumerated() where code != "@" {
                 guard let p = b.patterns[i + 1]?[code.lowercased()] else { continue }
+                bodyCodes[i + 1] = code.lowercased()
                 for (k, v) in p.assignments { variables[k] = v }
             }
         }
-        return Pose(model: model, variables: variables, scaleX: face.scaleX, scaleY: face.scaleY,
-                    positionX: face.positionX, positionY: face.positionY,
-                    scaleOffsetX: face.scaleOffsetX, scaleOffsetY: face.scaleOffsetY)
+        var pose = Pose(model: model, variables: variables, scaleX: face.scaleX, scaleY: face.scaleY,
+                        positionX: face.positionX, positionY: face.positionY,
+                        scaleOffsetX: face.scaleOffsetX, scaleOffsetY: face.scaleOffsetY)
+        pose.codes = codes
+        pose.bodyCodes = bodyCodes
+        pose.idle = profile.idles[bodyNumber]?[idleNumber]
+        pose.face = face
+        pose.body = b
+        return pose
     }
 }

@@ -501,6 +501,106 @@ case "emote":
     }
     writePNG(rgba, width: image.width, height: image.height, to: URL(fileURLWithPath: rest[2]))
 
+case "animate":
+    // animate <base> <out dir> --from SCENE [--lines N] [--seconds S] [--fps F] [--metal]:
+    // plays to line N with the characters' motions timed (waits advance a clock), then
+    // draws S seconds of the screen at F frames a second (idle loops, blinks, lip sync with
+    // the line's voice), printing each character's state. --metal draws them on the GPU and
+    // times it.
+    guard rest.count >= 2, let startScene else { fail("animate <base> <out dir> --from SCENE [--lines N] [--seconds S] [--fps F] [--metal]") }
+    let seconds = option("--seconds").flatMap(Double.init) ?? 3
+    let fps = option("--fps").flatMap(Double.init) ?? 6
+    let useMetal = args.contains("--metal")
+    let g = game(rest[0])
+    let out = URL(fileURLWithPath: rest[1])
+    try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    let cast = EmoteCast(game: g)
+    let stage = EmoteStage(cast: cast)
+    let player = ScenePlayer(game: g)
+    do { try player.start(startScene) } catch { fail("\(error)") }
+    var clock = 0.0, lines = 0
+    var voice: String?
+    do {
+        while lines < (lineLimit ?? 1), let event = try player.next() {
+            switch event {
+            case .command(let text):
+                let words = text.split(separator: " ")
+                if words.first == "mpl" { stage.command(text, cast: player.cast, time: clock) }
+                if words.first == "wait", words.count >= 2, let frames = Double(words[1]) { clock += frames / 60 }
+            case .message(let m):
+                lines += 1
+                voice = m.voice
+                clock += 1
+            default: break
+            }
+        }
+    } catch { fail("\(error)") }
+    // Every model loaded before drawing (the app loads them in the background).
+    for (_, c) in player.cast { if let spec = c.model, let pose = cast.pose(spec, body: c.body) { _ = cast.renderer(pose.model) } }
+    stage.reset(player.cast, time: clock)
+    stage.setVoice(voice, startedAt: clock)
+    print("at \(player.position.map { "\($0.scene) line \($0.line)" } ?? "?"), clock \(String(format: "%.1f", clock)) s, voice \(voice ?? "none")")
+    var pictureCache: [String: HGImage] = [:]
+    let picture = { (name: String) -> HGImage? in
+        if let hit = pictureCache[name] { return hit }
+        let image = (try? g.file(named: name + ".hg3")).flatMap { $0 }.flatMap { try? HGImage($0) }
+        pictureCache[name] = image
+        return image
+    }
+    let below = player.render(width: 1280, height: 720, layer: .below, pictures: picture)
+    let above = player.render(width: 1280, height: 720, layer: .above, pictures: picture)
+    let gpu = useMetal ? EmoteGPU(pixelFormat: .rgba8Unorm) : nil
+    if useMetal, gpu == nil { fail("no Metal device") }
+    let frames = Int(seconds * fps)
+    var gpuTimes: [Double] = []
+    for f in 0..<frames {
+        let t = clock + Double(f) / fps
+        let drawings = stage.drawings(at: t)
+        var canvas = below
+        func blend(_ rgba: [UInt8], w: Int, h: Int, x: Int, y: Int, alpha: Int) {
+            // Premultiplied over (the scene below is opaque).
+            for yy in max(0, y)..<min(720, y + h) {
+                for xx in max(0, x)..<min(1280, x + w) {
+                    let s = ((yy - y) * w + (xx - x)) * 4, d = (yy * 1280 + xx) * 4
+                    let a = Int(rgba[s + 3]) * alpha / 255
+                    guard a > 0 else { continue }
+                    for c in 0..<3 { canvas[d + c] = UInt8(min(255, Int(rgba[s + c]) * alpha / 255 + Int(canvas[d + c]) * (255 - a) / 255)) }
+                }
+            }
+        }
+        if let gpu {
+            let started = Date()
+            var layer = [UInt8](repeating: 0, count: 1280 * 720 * 4)
+            for d in drawings {
+                let list = d.renderer.drawList(variables: d.variables, transform: (d.scaleX, 0, 0, d.scaleY, d.x, d.y))
+                if let rgba = gpu.image(list, model: d.renderer.model, width: 1280, height: 720) {
+                    for i in stride(from: 0, to: rgba.count, by: 4) where rgba[i + 3] > 0 {
+                        let a = Int(rgba[i + 3]) * Int(d.alpha * 255) / 255
+                        for c in 0..<4 { layer[i + c] = UInt8(min(255, Int(rgba[i + c]) * Int(d.alpha * 255) / 255 + Int(layer[i + c]) * (255 - a) / 255)) }
+                    }
+                }
+            }
+            gpuTimes.append(Date().timeIntervalSince(started))
+            blend(layer, w: 1280, h: 720, x: 0, y: 0, alpha: 255)
+        } else {
+            for d in drawings {
+                let image = d.renderer.render(variables: d.variables, scale: d.scaleX)
+                blend(image.rgba, w: image.width, h: image.height,
+                      x: Int(d.x.rounded()) - image.originX, y: Int(d.y.rounded()) - image.originY, alpha: Int(d.alpha * 255))
+            }
+        }
+        blend(above, w: 1280, h: 720, x: 0, y: 0, alpha: 255)
+        writePNG(canvas, width: 1280, height: 720, to: out.appendingPathComponent(String(format: "%04d.png", f)))
+        print(String(format: "%5.2f s", t - clock), drawings.map { d in
+            String(format: "%d:%@ x %.0f y %.0f a %.2f body_UD %.1f eye %.1f talk %.2f", d.bank, d.model, d.x, d.y, d.alpha,
+                   d.variables["body_UD"] ?? 0, d.variables["face_eye_open"] ?? 0, d.variables["face_talk"] ?? 0)
+        }.joined(separator: " | "))
+    }
+    if !gpuTimes.isEmpty {
+        print(String(format: "Metal: %.1f ms a frame on average (evaluation, masks, drawing and readback, every character)",
+                     gpuTimes.dropFirst().reduce(0, +) / Double(max(1, gpuTimes.count - 1)) * 1000))
+    }
+
 case "emotecompare":
     // emotecompare <base> <spec> [m2body] [scale] [out prefix]: the pose drawn on the CPU and
     // with Metal (base mip level, as the CPU samples), and how far apart they are.
