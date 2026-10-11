@@ -21,7 +21,8 @@ import UniformTypeIdentifiers
 ///   cs2-cli kcs <base folder> <name.kcs>|all [from] [to]   kcScript disassembly
 ///   cs2-cli kcsrun <base folder> <name.kcs> [steps]    run a kcScript, list its native calls
 ///   cs2-cli play <base folder> [--lines N] [--from SCENE] [--text]   the story, headless
-///   cs2-cli snapshot <base folder> <out.png> [--lines N] [--from SCENE]  the screen after N lines
+///   cs2-cli snapshot <base folder> <out.png> [--lines N] [--from SCENE] [--save save.json]  the screen after N lines
+///   cs2-cli emote <base folder> <ca01,1,1,b,3,0,4> <out.png> [m2body] [scale]  one E-mote character
 /// Options: --key <passphrase> or --namekey <0xHEX> instead of recovering the name key.
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -40,6 +41,7 @@ let language = option("--lang")
 let clickList = option("--click")
 let givenKey = hexKey ?? passphrase.map(CS2Passphrase.key)
 let stopNative = option("--stop").flatMap { Int($0, radix: 16) }
+let savePath = option("--save")
 var stringVariables: [Int: String] = [:]
 while let pair = option("--strvar"), let eq = pair.firstIndex(of: "="), let n = Int(pair[..<eq]) {
     stringVariables[n] = String(pair[pair.index(after: eq)...])
@@ -338,6 +340,8 @@ case "play", "snapshot":
     let player = ScenePlayer(game: g, variables: variables)
     do { try player.start(first) } catch { fail("\(error)") }
     var lines = 0, scenes = 0, commands = 0
+    var lastMessage: ScenePlayer.Message?
+    var lastSnapshot: ScenePlayer.Snapshot?
     let limit = lineLimit ?? Int.max
     do {
         while lines < limit, let event = try player.next() {
@@ -350,6 +354,8 @@ case "play", "snapshot":
                 if command == "play", !textOnly { print("   > \(text)") }
             case .message(let m):
                 lines += 1
+                lastMessage = m
+                lastSnapshot = player.snapshot()
                 if command == "play" {
                     print((m.speaker.map { "\($0): " } ?? "") + m.text + (m.voice.map { "  [\($0)]" } ?? ""))
                 }
@@ -361,9 +367,29 @@ case "play", "snapshot":
         }
     } catch { fail("\(error)") }
     print("\(lines) lines, \(scenes) scenes, \(commands) commands" + (player.position.map { "; at \($0.scene) line \($0.line)" } ?? ""))
+    if let savePath, let m = lastMessage, let snap = lastSnapshot {
+        // The app's save format (CatSystemSave), for loading this line in Shiori.
+        struct Save: Encodable {
+            var date = Date()
+            var snapshot: ScenePlayer.Snapshot
+            var speaker: String?
+            var text: String
+            var voice: String?
+            var messageIndex: Int
+            var scene: String
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            try encoder.encode(Save(snapshot: snap, speaker: m.speaker, text: m.text, voice: m.voice,
+                                    messageIndex: m.index, scene: m.scene)).write(to: URL(fileURLWithPath: savePath))
+        } catch { fail("\(error)") }
+        print("saved line \(m.index) of \(m.scene) to \(savePath)")
+    }
     if command == "snapshot" {
         var cache: [String: HGImage] = [:]
-        let rgba = player.render(width: g.screenWidth, height: g.screenHeight) { name in
+        let rgba = player.render(width: g.screenWidth, height: g.screenHeight, emote: EmoteCast(game: g)) { name in
             if let hit = cache[name] { return hit }
             let image = (try? g.file(named: name + ".hg3")).flatMap { $0 }.flatMap { try? HGImage($0) }
             if image == nil { print("missing picture \(name)") }
@@ -431,6 +457,38 @@ case "boot":
     save("final.png")
     print("stopped at frame \(player.frameCount): \(player.stack.joined(separator: " › "))")
     for e in player.events { print("  " + e) }
+
+case "emote":
+    // emote <base> <spec> <out.png> [m2body digits] [scale]: one E-mote character on grey,
+    // e.g. `emote base ca01s,1,1,1,1,0,1 out.png 1,1,1,1,1,1`.
+    guard rest.count >= 3 else { fail("emote <base> <ca01,1,1,b,3,0,4> <out.png> [m2body] [scale]") }
+    let g = game(rest[0])
+    let cast = EmoteCast(game: g)
+    guard let pose = cast.profiles.pose(rest[1]) else { fail("no profile for \(rest[1])") }
+    let body = rest.count > 3 ? rest[3].split(separator: ",").map(String.init) : []
+    let scale = rest.count > 4 ? Double(rest[4]) ?? 1 : 1
+    let started = Date()
+    guard let renderer = cast.renderer(pose.model) else { fail("no model \(pose.model)") }
+    let loaded = Date()
+    guard let drawn = cast.draw(rest[1], body: body, scale: scale) else { fail("draw failed") }
+    let image = drawn.image
+    print("\(pose.model): \(renderer.model.objects.count) objects, \(image.width)×\(image.height), origin \(image.originX),\(image.originY);",
+          String(format: "load %.2f s, draw %.2f s", loaded.timeIntervalSince(started), Date().timeIntervalSince(loaded)))
+    print("variables:", drawn.pose.variables.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+    if ProcessInfo.processInfo.environment["CS2_LIST"] != nil {
+        var variables = renderer.model.restingVariables()
+        for (k, v) in drawn.pose.variables { variables[k] = v }
+        renderer.model.applySelectors(&variables)
+        for line in renderer.listing(variables: variables) { print("  " + line) }
+    }
+    guard image.width > 0 else { fail("nothing drawn") }
+    var rgba = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    for i in 0..<(image.width * image.height) {
+        let a = Int(image.rgba[i * 4 + 3])
+        for c in 0..<3 { rgba[i * 4 + c] = UInt8(min(255, Int(image.rgba[i * 4 + c]) + 96 * (255 - a) / 255)) }
+        rgba[i * 4 + 3] = 255
+    }
+    writePNG(rgba, width: image.width, height: image.height, to: URL(fileURLWithPath: rest[2]))
 
 default:
     fail("unknown command \(command)")

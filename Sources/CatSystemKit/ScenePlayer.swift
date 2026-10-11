@@ -12,8 +12,9 @@ import Foundation
 ///
 /// Screen state: `bg`, `cg`, `eg`, `fg` and `fw` put pictures (or `$AARRGGBB` colours) on
 /// numbered planes, which `pl N …` then moves, fades and blends (plane numbers are shared:
-/// `bg 0` is plane 0, `eg 1` plane 1). `mpl N model,…` shows an E-mote character, which
-/// is recorded but not drawn yet. Sounds (`bgm`, `se`, `pcm` for voices) are recorded.
+/// `bg 0` is plane 0, `eg 1` plane 1). `mpl N model,…` shows an E-mote character in bank
+/// N, which `mpl N pos`, `fade`, `scale`, `m2body` … then place and pose (`EmoteCast` draws
+/// them). Sounds (`bgm`, `se`, `pcm` for voices) are recorded.
 /// Waits and transitions (`wait`, `rwipe`, `rdraw`) take no time headless.
 public final class ScenePlayer {
     /// Reads a file by name (`01.cst`, `01.cstl`); nil when the game has no such file.
@@ -54,10 +55,29 @@ public final class ScenePlayer {
         public var visible = true
     }
 
+    /// An E-mote character on screen (`mpl` bank N).
+    public struct Character: Sendable, Codable, Equatable {
+        /// The character and expression digits (`ca01,1,1,b,3,0,4,0:0`); nil until set.
+        public var model: String?
+        /// `m2body` digits (head and body angles, gaze …); `@` keeps the last one.
+        public var body: [String] = []
+        /// Scene coordinates of the profile's origin (640, 360 is the default place).
+        public var x: Int?
+        public var y: Int?
+        /// `scale` in percent.
+        public var scaleX = 100
+        public var scaleY = 100
+        public var alpha = 255
+        public var visible = true
+
+        public init(model: String? = nil) { self.model = model }
+    }
+
     public private(set) var planes: [Int: Plane] = [:]
-    /// E-mote characters by plane: the model and motion argument (`ca01,1,1,b,3,0,4`).
-    public private(set) var characters: [Int: String] = [:]
-    public private(set) var characterX: [Int: Int] = [:]
+    /// E-mote characters by bank.
+    public private(set) var cast: [Int: Character] = [:]
+    /// The characters' model arguments by bank (`ca01,1,1,b,3,0,4`).
+    public var characters: [Int: String] { cast.compactMapValues(\.model) }
     public private(set) var bgm: String?
     public private(set) var sounds: [Int: String] = [:]
     public private(set) var voice: String?
@@ -109,13 +129,16 @@ public final class ScenePlayer {
         public var planes: [Int: Plane]
         public var characters: [Int: String]
         public var characterX: [Int: Int]
+        /// The characters in full (saves before E-mote drawing have only the two above).
+        public var cast: [Int: Character]?
         public var bgm: String?
         public var variables: [Int: Int]
     }
 
     public func snapshot() -> Snapshot {
         Snapshot(stack: frames.map { .init(scene: $0.name, line: $0.line, messageIndex: $0.messageIndex) },
-                 planes: planes, characters: characters, characterX: characterX, bgm: bgm, variables: variables)
+                 planes: planes, characters: characters, characterX: cast.compactMapValues(\.x), cast: cast,
+                 bgm: bgm, variables: variables)
     }
 
     /// Picks the story up where `snapshot` was taken.
@@ -137,8 +160,12 @@ public final class ScenePlayer {
                                 line: min(position.line, scene.lines.count), messageIndex: position.messageIndex))
         }
         planes = snapshot.planes
-        characters = snapshot.characters
-        characterX = snapshot.characterX
+        if let saved = snapshot.cast {
+            cast = saved
+        } else {
+            cast = snapshot.characters.mapValues { Character(model: $0) }
+            for (n, x) in snapshot.characterX { cast[n, default: Character()].x = x }
+        }
         bgm = snapshot.bgm
         sounds = [:]
         voice = nil
@@ -274,7 +301,7 @@ public final class ScenePlayer {
         case "pl":
             planeProperty(args)
         case "mpl", "fmpl":
-            characterCommand(args)
+            characterCommand(verb, args)
         case "bgm":
             bgm = args.count >= 2 && args[1] != "end" ? args[1] : (args.count == 1 && Int(args[0]) == nil ? args[0] : nil)
         case "se":
@@ -366,12 +393,15 @@ public final class ScenePlayer {
         planes[n] = plane
     }
 
-    /// Plane numbers: `N`, or `[a-b]`.
-    private static func planeNumbers(_ text: String) -> [Int] {
+    /// Plane numbers: `N`, `[a-b]` or `[a,b,…]`.
+    static func planeNumbers(_ text: String) -> [Int] {
         if text.hasPrefix("["), text.hasSuffix("]") {
-            let inner = text.dropFirst().dropLast().split(separator: "-").compactMap { Int($0) }
-            if inner.count == 2, inner[0] <= inner[1] { return Array(inner[0]...inner[1]) }
-            return inner
+            var out: [Int] = []
+            for part in text.dropFirst().dropLast().split(separator: ",") {
+                let ends = part.split(separator: "-").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                if ends.count == 2, ends[0] <= ends[1] { out += Array(ends[0]...ends[1]) } else { out += ends }
+            }
+            return out
         }
         return Int(text).map { [$0] } ?? []
     }
@@ -414,44 +444,104 @@ public final class ScenePlayer {
         }
     }
 
-    /// `mpl`, `mpl stop`, `mpl N model,…`, `mpl N pos x y`.
-    private func characterCommand(_ args: [String]) {
+    /// A character coordinate: a number or expression, `@` (unchanged), or `@+n`/`@-n`
+    /// (relative to the current value).
+    private func characterCoordinate(_ text: String, current: Int?, fallback: Int) -> Int? {
+        guard text.hasPrefix("@") else { return evaluate(text) }
+        let rest = text.dropFirst()
+        guard !rest.isEmpty else { return current }
+        return (current ?? fallback) + evaluate(String(rest.hasPrefix("+") ? rest.dropFirst() : rest))
+    }
+
+    private static func percent(_ text: String) -> Int? { Int(text.replacingOccurrences(of: "%", with: "")) }
+
+    /// `mpl` (clear), `mpl stop`/`tone` (no change), `mpl N` (remove), `mpl N model,…`,
+    /// `mpl N pos x y`, `amove1|2|3`/`move frames x y` (their end point), `fade frames from
+    /// to`, `blend a`, `disp 0|1`, `scale x% y%`, `ascale1 frames x% y%`, `m2body d,d,…`.
+    /// Motions over time (`arc`, `shake`, `quake`), touch, lip and physics settings are
+    /// recorded only. `fmpl` is the face beside the message window, not drawn yet.
+    private func characterCommand(_ verb: String, _ args: [String]) {
+        guard verb == "mpl" else { return }
         guard let first = args.first else {
-            characters = [:]
-            characterX = [:]
+            cast = [:]
             return
         }
-        guard let n = Int(first), args.count >= 2 else { return }
+        let banks = Self.planeNumbers(first)
+        guard !banks.isEmpty else { return }
+        guard args.count >= 2 else {
+            for n in banks { cast[n] = nil }
+            return
+        }
         let word = args[1]
-        if word.contains(",") {
-            characters[n] = word
-        } else if word == "pos" || word == "amove1" || word == "amove2" || word == "amove3" {
-            let at = word == "pos" ? 2 : 3
-            if args.count > at, let x = coordinate(args[at]) { characterX[n] = x }
+        for n in banks {
+            var c = cast[n] ?? Character()
+            if word.contains(","), word.first?.isLetter == true {
+                c.model = word
+            } else {
+                switch word {
+                case "pos" where args.count >= 3:
+                    c.x = characterCoordinate(args[2], current: c.x, fallback: 640)
+                    if args.count >= 4 { c.y = characterCoordinate(args[3], current: c.y, fallback: 360) }
+                case "amove1", "amove2", "amove3", "move":
+                    if args.count >= 4 { c.x = characterCoordinate(args[3], current: c.x, fallback: 640) }
+                    if args.count >= 5 { c.y = characterCoordinate(args[4], current: c.y, fallback: 360) }
+                case "fade" where args.count >= 5: c.alpha = Int(args[4]) ?? c.alpha
+                case "blend" where args.count >= 3: c.alpha = Int(args[2]) ?? c.alpha
+                case "disp": c.visible = (args.count > 2 ? Int(args[2]) : 1) != 0
+                case "scale" where args.count >= 3:
+                    c.scaleX = Self.percent(args[2]) ?? c.scaleX
+                    c.scaleY = args.count >= 4 ? Self.percent(args[3]) ?? c.scaleX : c.scaleX
+                case "ascale1", "ascale2", "ascale3":
+                    if args.count >= 4 { c.scaleX = Self.percent(args[3]) ?? c.scaleX }
+                    if args.count >= 5 { c.scaleY = Self.percent(args[4]) ?? c.scaleY }
+                case "m2body" where args.count >= 3:
+                    let digits = args[2].split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+                    var body = c.body
+                    for (i, d) in digits.enumerated() {
+                        while body.count <= i { body.append("@") }
+                        if d != "@", !d.isEmpty { body[i] = d }
+                    }
+                    c.body = body
+                default:
+                    if cast[n] == nil { continue }
+                }
+            }
+            cast[n] = c
         }
     }
 
     // MARK: Drawing
 
+    /// Where a character's drawing goes: its top-left corner on screen.
+    ///
+    /// The profile's `#position` is where the scene's 0,0 puts the model's origin relative
+    /// to the screen centre; scenes place characters around (640, 360). `scale` grows the
+    /// character about the profile's `#scaleoffset` point.
+    public static func placement(_ c: Character, image: EmoteImage, pose: EmoteProfiles.Pose,
+                                 width: Int, height: Int) -> (x: Int, y: Int) {
+        let m = Double(c.scaleX) / 100
+        let originX = Double(c.x ?? 640) + pose.positionX + Double(width) / 2 + pose.scaleOffsetX * (1 - m)
+        let originY = Double(c.y ?? 360) + pose.positionY + Double(height) / 2 + pose.scaleOffsetY * (1 - m)
+        return (Int(originX.rounded()) - image.originX, Int(originY.rounded()) - image.originY)
+    }
+
     /// The screen as straight RGBA (`width`×`height`): planes by number, pictures from HG-3
-    /// (frame 0, anchored at its base point when it has one), colour planes, and a
-    /// placeholder silhouette for each E-mote character over the background.
-    public func render(width: Int, height: Int, characters drawsCharacters: Bool = true,
+    /// (frame 0, anchored at its base point when it has one), colour planes, and the E-mote
+    /// characters (drawn by `emote`) over the background, in bank order.
+    public func render(width: Int, height: Int, emote: EmoteCast? = nil,
                        pictures: (String) -> HGImage?) -> [UInt8] {
         var canvas = Canvas(width: width, height: height)
         let order = planes.keys.sorted()
         var charactersDrawn = false
         func drawCharacters() {
             charactersDrawn = true
-            guard drawsCharacters else { return }
-            let shown = characters.keys.sorted()
-            for (i, n) in shown.enumerated() {
-                let x = characterX[n] ?? width * (i + 1) / (shown.count + 1)
-                // One colour per character (the model's second letter: `ca01` Chocola, `cb01` Vanilla …).
-                let palette: [UInt32] = [0xFF8A_5A44, 0xFFE8_E8F0, 0xFFE0_A040, 0xFF90_80E0, 0xFF40_3040, 0xFFF0_D080, 0xFF80_C0E0]
-                let letter = (characters[n] ?? "").unicodeScalars.dropFirst().first.map { Int($0.value) } ?? 0
-                let color = palette[letter % palette.count]
-                canvas.fill(x: x - 130, y: height / 4, w: 260, h: height * 3 / 4, color: color, alpha: 150)
+            guard let emote else { return }
+            for n in cast.keys.sorted() {
+                guard let c = cast[n], c.visible, c.alpha > 0, let model = c.model,
+                      let drawn = emote.draw(model, body: c.body, scale: Double(c.scaleX) / 100) else { continue }
+                let at = Self.placement(c, image: drawn.image, pose: drawn.pose, width: width, height: height)
+                canvas.blitPremultiplied(drawn.image.rgba, width: drawn.image.width, height: drawn.image.height,
+                                         x: at.x, y: at.y, alpha: c.alpha)
             }
         }
         for n in order {

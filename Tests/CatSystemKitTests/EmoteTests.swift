@@ -1,0 +1,60 @@
+import Foundation
+import Testing
+@testable import CatSystemKit
+
+@Test func psbSeedComesBackFromTheFirstKeystreamWord() {
+    for seed: UInt32 in [1, 742_877_301, 0xDEAD_BEEF, 0xFFFF_FFFF] {
+        var stream = EmoteKeystream(seed: seed)
+        let word = (0..<4).reduce(UInt32(0)) { $0 | UInt32(stream.next()) << (8 * $1) }
+        #expect(PSBFile.recoverSeed(firstWord: word) == seed)
+    }
+}
+
+@Test func identityPatchLeavesPointsAlone() {
+    for (u, v) in [(0.0, 0.0), (0.25, 0.75), (1.0, 0.5), (1.3, -0.2)] {
+        let p = EmoteRenderer.patch(EmoteRenderer.identityPatch, u, v)
+        #expect(abs(p.0 - u) < 1e-9 && abs(p.1 - v) < 1e-9)
+    }
+}
+
+@Test func profilesTurnSceneDigitsIntoVariables() {
+    let texts: [String: String] = [
+        "m2view.cnf": "#profile\nca01\t\tca01.pfl\n",
+        "ca01.pfl": "#charaname\n1\tbody\tca01_l_body_1\n#motname\n1\t0\twait\t\tca_m.dif\tbody.dif\n",
+        "ca_m.dif": "#include\nca01.inc\n#scale\n0.6 0.6 // X Y\n#position\n-640 -204\n#scaleoffset\n0 -152\n",
+        "ca01.inc": "#defval\nfade_z 1.0\n/*\n comment\n*/\n#pattern\n%1 0 none\nface_cheek 99\n%1 1 1\nface_cheek 0\n%2 b b\nface_mouth 10\nface_talk 1\n",
+        "body.dif": "#pattern\n%1 1 std default\nhead_LR 0\n%1 2 left\nhead_LR -30\n",
+    ]
+    let profiles = EmoteProfiles(files: { texts[$0].map { Array($0.utf8) } })
+    let pose = profiles.pose("ca01,1,1,b", body: ["2"])
+    #expect(pose?.model == "ca01_l_body_1")
+    #expect(pose?.variables["face_cheek"] == 0)
+    #expect(pose?.variables["face_mouth"] == 10)
+    #expect(pose?.variables["face_talk"] == 0)
+    #expect(pose?.variables["fade_z"] == 1)
+    #expect(pose?.variables["head_LR"] == -30)
+    #expect(pose?.scaleX == 0.6 && pose?.positionY == -204 && pose?.scaleOffsetY == -152)
+}
+
+@Test func mplCommandsPlaceAndPoseCharacters() throws {
+    let scene = """
+    mpl 2 blend 0
+    mpl 2 pos 1080 @
+    mpl 2 ca01,1,1,b,3,0,4
+    mpl 2 m2body 1,2,1,1,1,1
+    mpl 2 fade 20 0 255
+    mpl 2 m2body @,@,@,@,@,2
+    mpl [2,3] amove1 70 @-300 365
+    mpl 2 scale 130% 130%
+    """
+    let player = ScenePlayer(files: { _ in nil })
+    for line in scene.split(separator: "\n") { try player.execute(String(line)) }
+    let c = try #require(player.cast[2])
+    #expect(c.model == "ca01,1,1,b,3,0,4")
+    #expect(c.body == ["1", "2", "1", "1", "1", "2"])
+    #expect(c.x == 780 && c.y == 365)
+    #expect(c.alpha == 255 && c.scaleX == 130)
+    #expect(player.cast[3]?.model == nil)
+    try player.execute("mpl")
+    #expect(player.cast.isEmpty)
+}
