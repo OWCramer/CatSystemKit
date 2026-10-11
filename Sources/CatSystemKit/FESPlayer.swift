@@ -22,6 +22,10 @@ public final class FESPlayer {
     public private(set) var frameCount = 0
     /// Sounds started, unknown commands and other events, for headless runs.
     public private(set) var events: [String] = []
+    /// The `$n` variables, as the scripts left them (`$512` is -3 after GAME START).
+    public var variables: [Int: Int] { globals }
+    /// The `$strN` string variables (`$str200` names the first scene after GAME START).
+    public var stringVariables: [Int: String] { strings }
     /// The story script `execkcs` asked for (`sscript` when the game starts), if any.
     public private(set) var requestedKCS: String?
 
@@ -182,35 +186,17 @@ public final class FESPlayer {
     }
 
     private func fill(_ canvas: inout [UInt8], x: Int, y: Int, w: Int, h: Int, color: UInt32, alpha: Int) {
-        let a = Int(color >> 24) * alpha / 255
-        let r = Int(color >> 16 & 0xFF), g = Int(color >> 8 & 0xFF), b = Int(color & 0xFF)
-        for yy in max(0, y)..<min(height, y + h) {
-            for xx in max(0, x)..<min(width, x + w) {
-                let o = (yy * width + xx) * 4
-                canvas[o] = UInt8((r * a + Int(canvas[o]) * (255 - a)) / 255)
-                canvas[o + 1] = UInt8((g * a + Int(canvas[o + 1]) * (255 - a)) / 255)
-                canvas[o + 2] = UInt8((b * a + Int(canvas[o + 2]) * (255 - a)) / 255)
-            }
-        }
+        var c = Canvas(width: width, height: height, pixels: canvas)
+        canvas = []
+        c.fill(x: x, y: y, w: w, h: h, color: color, alpha: alpha)
+        canvas = c.pixels
     }
 
     private func blit(_ canvas: inout [UInt8], _ frame: HGImage.Frame, x: Int, y: Int, alpha: Int) {
-        let x0 = max(0, x), x1 = min(width, x + frame.width)
-        let y0 = max(0, y), y1 = min(height, y + frame.height)
-        guard x0 < x1, y0 < y1 else { return }
-        frame.rgba.withUnsafeBufferPointer { src in
-            canvas.withUnsafeMutableBufferPointer { dst in
-                for yy in y0..<y1 {
-                    for xx in x0..<x1 {
-                        let s = ((yy - y) * frame.width + (xx - x)) * 4
-                        let a = Int(src[s + 3]) * alpha / 255
-                        guard a > 0 else { continue }
-                        let d = (yy * width + xx) * 4
-                        for c in 0..<3 { dst[d + c] = UInt8((Int(src[s + c]) * a + Int(dst[d + c]) * (255 - a)) / 255) }
-                    }
-                }
-            }
-        }
+        var c = Canvas(width: width, height: height, pixels: canvas)
+        canvas = []
+        c.blit(frame, x: x, y: y, alpha: alpha)
+        canvas = c.pixels
     }
 }
 

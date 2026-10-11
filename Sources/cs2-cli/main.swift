@@ -16,6 +16,12 @@ import UniformTypeIdentifiers
 ///   cs2-cli scene <base folder> <name.cst>        a scene, one line per entry
 ///   cs2-cli commands <base folder>                command words across every scene
 ///   cs2-cli fes <base folder> <name.fes>          a FES (system screen) script as text
+///   cs2-cli boot <base folder> <out dir> [frames]  flow.fes headless, screens to PNG
+///   cs2-cli raw <base folder> <file> <out>         a file as stored, decrypted (for a scratch folder)
+///   cs2-cli kcs <base folder> <name.kcs>|all [from] [to]   kcScript disassembly
+///   cs2-cli kcsrun <base folder> <name.kcs> [steps]    run a kcScript, list its native calls
+///   cs2-cli play <base folder> [--lines N] [--from SCENE] [--text]   the story, headless
+///   cs2-cli snapshot <base folder> <out.png> [--lines N] [--from SCENE]  the screen after N lines
 /// Options: --key <passphrase> or --namekey <0xHEX> instead of recovering the name key.
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -33,6 +39,26 @@ let hexKey = option("--namekey").flatMap { UInt32($0.replacingOccurrences(of: "0
 let language = option("--lang")
 let clickList = option("--click")
 let givenKey = hexKey ?? passphrase.map(CS2Passphrase.key)
+let stopNative = option("--stop").flatMap { Int($0, radix: 16) }
+var stringVariables: [Int: String] = [:]
+while let pair = option("--strvar"), let eq = pair.firstIndex(of: "="), let n = Int(pair[..<eq]) {
+    stringVariables[n] = String(pair[pair.index(after: eq)...])
+}
+var sharedWords: [(UInt32, UInt32)] = []
+while let pair = option("--shared"), let eq = pair.firstIndex(of: "="),
+      let offset = UInt32(pair[..<eq].replacingOccurrences(of: "0x", with: ""), radix: 16),
+      let value = Int64(pair[pair.index(after: eq)...]) {
+    sharedWords.append((offset, UInt32(truncatingIfNeeded: value)))
+}
+var answers: [Int: UInt32] = [:]
+while let pair = option("--answer"), let eq = pair.firstIndex(of: "="), let id = Int(pair[..<eq], radix: 16),
+      let value = Int64(pair[pair.index(after: eq)...]) {
+    answers[id] = UInt32(truncatingIfNeeded: value)
+}
+let lineLimit = option("--lines").flatMap { Int($0) }
+let startScene = option("--from")
+let textOnly = args.contains("--text")
+args.removeAll { $0 == "--text" }
 guard let command = args.first else { fail("usage: cs2-cli key|findkey|archives|list|hex|hg|png|scenes|scene|commands|fes …") }
 let rest = Array(args.dropFirst())
 
@@ -55,6 +81,17 @@ func file(_ game: CatSystemGame, _ name: String) -> [UInt8] {
         guard let bytes = try game.file(named: name) else { fail("no file \(name)") }
         return bytes
     } catch { fail("\(error)") }
+}
+
+func writePNG(_ rgba: [UInt8], width: Int, height: Int, to url: URL) {
+    let cg = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                     space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                     bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                     provider: CGDataProvider(data: Data(rgba) as CFData)!, decode: nil,
+                     shouldInterpolate: false, intent: .defaultIntent)!
+    let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+    CGImageDestinationAddImage(dest, cg, nil)
+    CGImageDestinationFinalize(dest)
 }
 
 func printable(_ bytes: some Collection<UInt8>) -> String {
@@ -199,6 +236,147 @@ case "commands":
         }
     }
     for (word, n) in counts.sorted(by: { $0.value > $1.value }) { print("\(n)\t\(word)\t\(example[word] ?? "")") }
+
+case "raw":
+    // A file's bytes as stored (decrypted), for study in a scratch folder.
+    guard rest.count >= 3 else { fail("raw <base> <file> <out>") }
+    do { try Data(file(game(rest[0]), rest[1])).write(to: URL(fileURLWithPath: rest[2])) } catch { fail("\(error)") }
+
+case "kcs":
+    // Disassembly, optionally only [from, to) (hex addresses).
+    guard rest.count >= 2 else { fail("kcs <base> <name.kcs>|all [from] [to]") }
+    if rest[1] == "all" {
+        // Every kcScript: instruction counts, and whether the whole code decodes.
+        let g = game(rest[0])
+        var total = 0, failed = 0
+        for name in g.names(withExtension: "kcs") {
+            do {
+                let script = try KCScript(file(g, name))
+                let count = try script.instructions().count
+                total += count
+                print("\(name)\t\(script.codeSize) bytes\t\(count) instructions\t\(script.strings.count) strings")
+            } catch {
+                failed += 1
+                print("\(name)\tFAILED \(error)")
+            }
+        }
+        print("\(total) instructions, \(failed) failed")
+        break
+    }
+    do {
+        let script = try KCScript(file(game(rest[0]), rest[1]))
+        let from = rest.count > 2 ? Int(rest[2], radix: 16) ?? 0 : 0
+        let to = rest.count > 3 ? Int(rest[3], radix: 16) ?? Int.max : Int.max
+        print("code \(script.codeSize) bytes, data \(script.dataSize), stack \(script.stackSize), \(script.strings.count) strings")
+        for i in try script.instructions() where i.address >= from && i.address < to { print(script.describe(i)) }
+    } catch { fail("\(error)") }
+
+case "kcsrun":
+    // Runs a kcScript headless with the recording host and lists the natives it called.
+    // --stop <hex id>: stop at that native (sscript: 145, the scene load).
+    guard rest.count >= 2 else { fail("kcsrun <base> <name.kcs> [steps] [--stop id] [--strvar n=text] [--shared off=value] [--answer id=value]") }
+    do {
+        let script = try KCScript(file(game(rest[0]), rest[1]))
+        let host = KCSRecordingHost()
+        if let stop = stopNative { host.stopAt = [stop] }
+        for (n, text) in stringVariables { host.stringVariables[n] = text }
+        host.answers = answers
+        let machine = KCSMachine(script: script)
+        machine.host = host
+        for (offset, value) in sharedWords { try machine.store(KCSMachine.sharedBase + offset, value, width: 4) }
+        let limit = rest.count > 2 ? Int(rest[2]) ?? 2_000_000 : 2_000_000
+        var failure: Error?
+        while !machine.halted, host.stopped == nil, machine.steps < limit {
+            do { try machine.step() } catch { failure = error; break }
+        }
+        var counts: [Int: Int] = [:]
+        for c in host.calls { counts[c.id, default: 0] += 1 }
+        let shown = host.calls.count > 400 ? Array(host.calls.prefix(200)) + Array(host.calls.suffix(200)) : host.calls
+        for c in shown {
+            print(String(format: "%8d  pc %06x  native %03x", c.step, c.pc, c.id),
+                  c.args.map { String(format: "%x", $0) }.joined(separator: " "), c.note ?? "")
+        }
+        print("\(machine.steps) steps, \(host.calls.count) native calls (\(counts.count) different)",
+              machine.halted ? "halted" : host.stopped.map { String(format: "stopped at native %03x", $0.id) }
+                ?? failure.map { "failed: \($0)" } ?? "step limit")
+    } catch { fail("\(error)") }
+
+case "play", "snapshot":
+    // play <base>: the boot flow headless (logo, language OK, title GAME START), the kcScripts
+    // up to the first scene, then the story: English lines with speakers, and the commands.
+    // snapshot <base> <out.png>: the same, drawing the screen after the last line.
+    // --lines N stops after N lines; --from SCENE skips the boot; --text prints lines only.
+    guard rest.count >= (command == "play" ? 1 : 2) else { fail("\(command) <base>\(command == "play" ? "" : " <out.png>") [--lines N] [--from SCENE] [--text]") }
+    let g = game(rest[0])
+    var variables: [Int: Int] = [:]
+    let first: String
+    if let startScene {
+        first = startScene
+    } else {
+        let fes = FESPlayer(game: g)
+        do { try fes.start("flow") } catch { fail("\(error)") }
+        var clicks = ["decide", "btn1[0]"]
+        var idle = 0
+        var last: [String] = []
+        while fes.requestedKCS == nil, fes.frameCount < 6000 {
+            fes.step()
+            if fes.stack != last { last = fes.stack; idle = 0 } else { idle += 1 }
+            if idle >= 20, let next = clicks.first, fes.canPush(next) {
+                fes.push(next)
+                clicks.removeFirst()
+            }
+        }
+        guard fes.requestedKCS == "sscript" else { fail("the title didn't start the story (frame \(fes.frameCount))") }
+        print("boot: flow.fes → title → GAME START in \(fes.frameCount) frames; $512 = \(fes.variables[512] ?? 0), $str200 = \(fes.stringVariables[200] ?? "")")
+        do {
+            let boot = try KCSBoot.firstScene(game: g, variables: fes.variables, strings: fes.stringVariables)
+            print("kcs: main.kcs \(boot.mainSteps) instructions (starts flow), sscript.kcs \(boot.sscriptSteps) instructions, \(boot.nativeCalls) native calls → scene \(boot.scene)")
+            first = boot.scene
+            variables = boot.variables
+        } catch { fail("\(error)") }
+    }
+    let player = ScenePlayer(game: g, variables: variables)
+    do { try player.start(first) } catch { fail("\(error)") }
+    var lines = 0, scenes = 0, commands = 0
+    let limit = lineLimit ?? Int.max
+    do {
+        while lines < limit, let event = try player.next() {
+            switch event {
+            case .scene(let name):
+                scenes += 1
+                if command == "play" { print("== \(name)") }
+            case .command(let text):
+                commands += 1
+                if command == "play", !textOnly { print("   > \(text)") }
+            case .message(let m):
+                lines += 1
+                if command == "play" {
+                    print((m.speaker.map { "\($0): " } ?? "") + m.text + (m.voice.map { "  [\($0)]" } ?? ""))
+                }
+            case .missingScene(let name):
+                print("(no scene \(name) in this release)")
+            case .end(let why):
+                print("== end: \(why)")
+            }
+        }
+    } catch { fail("\(error)") }
+    print("\(lines) lines, \(scenes) scenes, \(commands) commands" + (player.position.map { "; at \($0.scene) line \($0.line)" } ?? ""))
+    if command == "snapshot" {
+        var cache: [String: HGImage] = [:]
+        let rgba = player.render(width: g.screenWidth, height: g.screenHeight) { name in
+            if let hit = cache[name] { return hit }
+            let image = (try? g.file(named: name + ".hg3")).flatMap { $0 }.flatMap { try? HGImage($0) }
+            if image == nil { print("missing picture \(name)") }
+            cache[name] = image
+            return image
+        }
+        writePNG(rgba, width: g.screenWidth, height: g.screenHeight, to: URL(fileURLWithPath: rest[1]))
+        let shown = player.planes.keys.sorted().compactMap { n -> String? in
+            guard let p = player.planes[n], p.visible, p.alpha > 0 else { return nil }
+            return "\(n):\(p.file ?? p.color.map { String(format: "$%08X", $0) } ?? "?")"
+        }
+        print("planes \(shown.joined(separator: " ")); characters \(player.characters.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: " "))")
+    }
 
 case "fes":
     guard rest.count >= 2 else { fail("fes <base> <name.fes>") }
