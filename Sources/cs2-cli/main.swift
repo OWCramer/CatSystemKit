@@ -31,6 +31,7 @@ var args = Array(CommandLine.arguments.dropFirst())
 let passphrase = option("--key")
 let hexKey = option("--namekey").flatMap { UInt32($0.replacingOccurrences(of: "0x", with: ""), radix: 16) }
 let language = option("--lang")
+let clickList = option("--click")
 let givenKey = hexKey ?? passphrase.map(CS2Passphrase.key)
 guard let command = args.first else { fail("usage: cs2-cli key|findkey|archives|list|hex|hg|png|scenes|scene|commands|fes …") }
 let rest = Array(args.dropFirst())
@@ -202,6 +203,56 @@ case "commands":
 case "fes":
     guard rest.count >= 2 else { fail("fes <base> <name.fes>") }
     do { print(try FESScript.text(file(game(rest[0]), rest[1]))) } catch { fail("\(error)") }
+
+case "boot":
+    // Runs flow.fes (brand logo, language picker, title) headless, clicking the buttons in
+    // --click (default `decide`, the language picker's OK) once each is enabled, and
+    // writes the screen to <out dir> whenever the running scripts change, then stops a
+    // second after the title menu is waiting (or after [frames]).
+    guard rest.count >= 2 else { fail("boot <base> <out dir> [frames]") }
+    let g = game(rest[0])
+    let out = URL(fileURLWithPath: rest[1])
+    try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    let limit = rest.count > 2 ? Int(rest[2]) ?? 3600 : 3600
+    var clicks = (clickList ?? "decide").split(separator: ",").map(String.init)
+    let player = FESPlayer(game: g)
+    do { try player.start("flow") } catch { fail("\(error)") }
+    var last: [String] = []
+    var idle = 0
+    var titleWaiting = 0
+    func save(_ name: String) {
+        let rgba = player.render()
+        let cg = CGImage(width: player.width, height: player.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                         bytesPerRow: player.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                         provider: CGDataProvider(data: Data(rgba) as CFData)!, decode: nil,
+                         shouldInterpolate: false, intent: .defaultIntent)!
+        let dest = CGImageDestinationCreateWithURL(out.appendingPathComponent(name) as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, cg, nil)
+        CGImageDestinationFinalize(dest)
+    }
+    for _ in 0..<limit {
+        player.step()
+        let stack = player.stack
+        if stack != last {
+            print(String(format: "%5d", player.frameCount), stack.joined(separator: " › "))
+            last = stack
+            idle = 0
+        } else {
+            idle += 1
+        }
+        if idle == 20 { save(String(format: "%05d.png", player.frameCount)) }
+        if idle >= 20, let next = clicks.first, player.canPush(next) {
+            print(String(format: "%5d", player.frameCount), "click \(next)")
+            player.push(next)
+            clicks.removeFirst()
+        }
+        if stack.last == "title#WAIT" { titleWaiting += 1 } else { titleWaiting = 0 }
+        if titleWaiting == 60 || player.requestedKCS != nil { break }
+    }
+    save("final.png")
+    print("stopped at frame \(player.frameCount): \(player.stack.joined(separator: " › "))")
+    for e in player.events { print("  " + e) }
 
 default:
     fail("unknown command \(command)")

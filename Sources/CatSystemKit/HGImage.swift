@@ -36,6 +36,9 @@ public struct HGImage: Sendable {
 
     public let frames: [Frame]
 
+    /// A frame by its id (scripts name frames by id: `sys_title_en` 9 is the logo).
+    public func frame(id: Int) -> Frame? { frames.first { $0.id == id } }
+
     public enum Failure: Error, CustomStringConvertible {
         case notHG3
         case malformed(String)
