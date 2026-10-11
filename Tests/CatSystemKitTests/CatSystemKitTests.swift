@@ -35,6 +35,7 @@ private final class StubContext: FESContext {
     func setLocal(_ index: Int, _ value: Int) { locals[index] = value }
     func system(_ name: String) -> Int? { name == "_EXITCODE_" ? -1 : nil }
     func macro(_ name: String) -> String? { name == "VER_MIN" ? "3500" : nil }
+    func objectHandle(_ name: String, index: Int?) -> Int? { name == "btn" ? 0x1000 + (index ?? 0) : nil }
 }
 
 @Test func fesExpressions() {
@@ -45,6 +46,24 @@ private final class StubContext: FESContext {
     #expect(FESExpression.evaluate("$(840+10)", c) == 3)
     #expect(FESExpression.evaluate("VER_MIN+1", c) == 3501)
     #expect(FESExpression.evaluate("0xff000000", c) == 0xFF00_0000)
+    // The window colour's alpha (`($850>>24) * 255 / 100`) and back (`\\72 << 24`).
+    #expect(FESExpression.evaluate("((80<<24)>>24) * 255 / 100", c) == 204)
+    #expect(FESExpression.evaluate("$850|4", c) == 7)
+    #expect(FESExpression.evaluate("$850&1&&1", c) == 1)
+    // Object names are handles, compared with `_CLICK_L_`.
+    #expect(FESExpression.evaluate("btn[2]", c) == 0x1002)
+    #expect(FESExpression.evaluate("btn[\\10-15]==4097", c) == 1)
+}
+
+@Test func fesArcMovesBySineAndText() {
+    let o = FESObject(type: "PLANE", baseName: "pl", index: nil, handle: 1)
+    o.startArc(frames: 10, from: 0, to: 90, dx: 0, dy: 5)
+    for _ in 0..<10 { o.advanceMotion() }
+    #expect(o.y == 5 && !o.isMoving)
+    o.startArc(frames: 10, from: 0, to: 90, dx: 0, dy: -5)
+    o.finishMotion()
+    #expect(o.y == 0)
+    #expect(FESInstance.format("No.%02d : ", [7]) == "No.07 : ")
 }
 
 @Test func fesProgramSections() {

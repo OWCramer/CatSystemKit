@@ -1,5 +1,6 @@
 import CatSystemKit
 import CoreGraphics
+import CoreText
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -11,12 +12,14 @@ import UniformTypeIdentifiers
 ///   cs2-cli list <archive.int>                    entries with size and magic
 ///   cs2-cli hex <base folder> <file> [bytes]      a file's first bytes (scenes inflated)
 ///   cs2-cli hg <base folder> <file.hg3>           an HG-3's frames and sections
-///   cs2-cli png <base folder> <file.hg3> <out.png> [frame]
+///   cs2-cli png <base folder> <file.hg3> <out.png> [frame | id:N]
 ///   cs2-cli scenes <base folder>                  every scene with line and command counts
 ///   cs2-cli scene <base folder> <name.cst>        a scene, one line per entry
 ///   cs2-cli commands <base folder>                command words across every scene
 ///   cs2-cli fes <base folder> <name.fes>          a FES (system screen) script as text
 ///   cs2-cli boot <base folder> <out dir> [frames]  flow.fes headless, screens to PNG
+///   cs2-cli fesrun <base> <script> <out dir> [--do "30:click 640,360;60:shot a;…"] [--set 800=1,…] [--saves N]
+///                                                 a system screen (saveload, config, hist_b) with sample saves
 ///   cs2-cli raw <base folder> <file> <out>         a file as stored, decrypted (for a scratch folder)
 ///   cs2-cli kcs <base folder> <name.kcs>|all [from] [to]   kcScript disassembly
 ///   cs2-cli kcsrun <base folder> <name.kcs> [steps]    run a kcScript, list its native calls
@@ -60,6 +63,9 @@ while let pair = option("--answer"), let eq = pair.firstIndex(of: "="), let id =
       let value = Int64(pair[pair.index(after: eq)...]) {
     answers[id] = UInt32(truncatingIfNeeded: value)
 }
+let doList = option("--do")
+let setList = option("--set")
+let saveCount = option("--saves")
 let lineLimit = option("--lines").flatMap { Int($0) }
 let startScene = option("--from")
 let textOnly = args.contains("--text")
@@ -166,9 +172,15 @@ case "png":
     do {
         let started = Date()
         let image = try HGImage(file(game(rest[0]), rest[1]))
-        let index = rest.count > 3 ? Int(rest[3]) ?? 0 : 0
-        guard index < image.frames.count else { fail("\(image.frames.count) frames") }
+        // `id:1060` picks a frame by its id instead of its place.
+        let index = rest.count > 3 ? (rest[3].hasPrefix("id:") ? image.frames.firstIndex { $0.id == Int(rest[3].dropFirst(3)) } ?? -1 : Int(rest[3]) ?? 0) : 0
+        guard index >= 0, index < image.frames.count else { fail("\(image.frames.count) frames") }
         let f = image.frames[index]
+        let alphas = stride(from: 3, to: f.rgba.count, by: 4).map { f.rgba[$0] }
+        print("alpha \(alphas.min() ?? 0)…\(alphas.max() ?? 0); down the middle:", stride(from: 0, to: f.height, by: max(1, f.height / 8)).map { y in
+            let o = (y * f.width + f.width / 2) * 4
+            return "\(f.rgba[o]),\(f.rgba[o + 1]),\(f.rgba[o + 2]),\(f.rgba[o + 3])"
+        }.joined(separator: " "))
         print("frame \(f.id): \(f.width)×\(f.height) at \(f.offsetX),\(f.offsetY) on \(f.canvasWidth)×\(f.canvasHeight)",
               String(format: "(decoded in %.0f ms)", Date().timeIntervalSince(started) * 1000))
         let cg = CGImage(width: f.width, height: f.height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: f.width * 4,
@@ -743,6 +755,107 @@ case "emoteinfo":
         }
     }
 
+case "fesrun":
+    // A system screen headless against a sample host (saves, settings and a backlog in
+    // memory): `--do` lists frame:action steps (`click x,y`, `rclick`, `hover x,y`,
+    // `wheel up|down`, `shot name`), every action logged with the scripts' stack.
+    guard rest.count >= 3 else { fail("fesrun <base> <script> <out dir> [--do steps] [--set n=v,…] [--saves N]") }
+    let g = game(rest[0])
+    let out = URL(fileURLWithPath: rest[2])
+    try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+    let host = SampleFESHost(saves: Int(saveCount ?? "3") ?? 3)
+    let player = FESPlayer(game: g)
+    player.host = host
+    player.fonts = registerFonts(URL(fileURLWithPath: rest[0]).appendingPathComponent("font"))
+    for (n, v) in [(900, "sys_meswnd_n"), (901, "sys_meswnd"), (902, "sys_meswnd_fmask"), (910, "sys_log"), (911, "sys_log_cursor")] {
+        player.setString(n, v)
+    }
+    for (n, v) in player.assignments(script: "flow", block: "INIT_GLOBAL") { player.setVariable(n, v) }
+    for pair in (setList ?? "").split(separator: ",") {
+        let kv = pair.split(separator: "=")
+        if kv.count == 2, let n = Int(kv[0]), let v = Int(kv[1]) { player.setVariable(n, v) }
+    }
+    do { try player.start(rest[1]) } catch { fail("\(error)") }
+    var steps: [Int: [String]] = [:]
+    for step in (doList ?? "").split(separator: ";") {
+        let parts = step.split(separator: ":", maxSplits: 1)
+        if parts.count == 2, let f = Int(parts[0]) { steps[f, default: []].append(String(parts[1])) }
+    }
+    let last = steps.keys.max() ?? 120
+    func shot(_ name: String) {
+        writePNG(player.render(), width: player.width, height: player.height, to: out.appendingPathComponent(name + ".png"))
+    }
+    var stackShown: [String] = []
+    for frame in 0...last {
+        for action in steps[frame] ?? [] {
+            let words = action.split(separator: " ").map(String.init)
+            let xy = words.count > 1 ? words[1].split(separator: ",").compactMap { Int($0) } : []
+            switch words.first {
+            case "click" where xy.count == 2: print(frame, "click", xy, "→", player.click(atX: xy[0], y: xy[1], pointer: true) ?? "nothing")
+            case "hover" where xy.count == 2: player.hover(atX: xy[0], y: xy[1]); print(frame, "hover", xy, "→", player.button(atX: xy[0], y: xy[1]) ?? "nothing")
+            case "rclick": player.rightClick(); print(frame, "right click")
+            case "wheel": player.scroll(up: words.count > 1 && words[1] == "up"); print(frame, "wheel")
+            case "shot" where words.count > 1: shot(words[1])
+            default: print("? \(action)")
+            }
+        }
+        player.step()
+        if player.stack != stackShown {
+            stackShown = player.stack
+            print(String(format: "%5d", frame), stackShown.joined(separator: " › "), player.rootExitCode.map { "exit \($0)" } ?? "")
+        }
+    }
+    print("host:", host.log.joined(separator: "; "))
+    for e in player.events where !e.contains(" play") && !e.contains(" load ") { print("  " + e) }
+
 default:
     fail("unknown command \(command)")
+}
+
+/// Registers the game's fonts for this process and maps their file names to their names.
+func registerFonts(_ folder: URL) -> [String: String] {
+    var names: [String: String] = [:]
+    for url in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [] {
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        if let d = (CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor])?.first,
+           let name = CTFontDescriptorCopyAttribute(d, kCTFontNameAttribute) as? String {
+            names[url.deletingPathExtension().lastPathComponent.lowercased()] = name
+        }
+    }
+    return names
+}
+
+/// Saves, settings and a backlog in memory, for `fesrun`.
+final class SampleFESHost: FESHost {
+    var saves: [Int: FESSaveInfo] = [:]
+    var config: [String: Int] = ["messpd": 4, "autospd": 4, "wndcolor": 80 << 24, "contvoice": 1, "screen": 1, "lang_text_sub": -1]
+    var sound: [String: Int] = [:]
+    var log: [String] = []
+
+    init(saves count: Int) {
+        for slot in 0..<count {
+            var rgba = [UInt8](repeating: 255, count: 186 * 105 * 4)
+            for y in 0..<105 { for x in 0..<186 { let o = (y * 186 + x) * 4; rgba[o] = UInt8(x); rgba[o + 1] = UInt8(y * 2); rgba[o + 2] = UInt8(80 * slot) } }
+            saves[slot == 2 ? 9 : slot] = FESSaveInfo(title: "Chocola", comment: "Sample line \(slot + 1): Master, good morning, nya!",
+                                                      date: Date(timeIntervalSince1970: 1_790_000_000 + Double(slot) * 3600),
+                                                      thumbnail: (rgba, 186, 105))
+        }
+    }
+
+    func fesConfig(_ name: String) -> Int? { config[name] }
+    func fesSetConfig(_ name: String, value: Int) { config[name] = value; log.append("setconf \(name)=\(value)") }
+    func fesSoundConfig(_ args: [String]) -> Int? { sound[args.joined(separator: " ")] ?? 80 }
+    func fesSetSoundConfig(_ args: [String], value: Int) { sound[args.joined(separator: " ")] = value; log.append("snd \(args.joined(separator: " "))=\(value)") }
+    func fesSaveState(slot: Int) -> Int { saves[slot] == nil ? 0 : 1 }
+    func fesNewestSave(from: Int, count: Int) -> Int {
+        saves.filter { $0.key >= from && $0.key < from + count }.max { $0.value.date < $1.value.date }?.key ?? -1
+    }
+    func fesSave(slot: Int) { saves[slot] = FESSaveInfo(title: "New", comment: "Saved here", date: Date(), thumbnail: nil); log.append("save \(slot)") }
+    func fesDeleteSave(slot: Int) { saves[slot] = nil; log.append("delete \(slot)") }
+    func fesSaveInfo(slot: Int) -> FESSaveInfo? { saves[slot] }
+    func fesReturnToTitle() { log.append("rettitle") }
+    var fesLog: [FESLogEntry] {
+        (0..<9).map { FESLogEntry(name: $0 % 2 == 0 ? "Chocola" : "Vanilla", nameID: $0 % 2, text: "Line \($0 + 1): a backlog line long enough to wrap onto a second line of the block, nya.", hasVoice: $0 % 3 != 2) }
+    }
+    func fesPlayLogVoice(_ index: Int) { log.append("voice \(index)") }
 }

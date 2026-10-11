@@ -25,6 +25,9 @@ public final class EmoteStage {
     public var width = 1280.0, height = 720.0
     /// Hair and bust physics (on).
     public var physicsEnabled = true
+    /// The CONFIG's "Chest Bounciness" (`m2_setconf iner_lv N bust`, 0–200 over 100): how
+    /// strongly the bust springs answer a push.
+    public var bustInertia = 1.0
 
     public init(cast: EmoteCast) {
         self.cast = cast
@@ -143,7 +146,8 @@ public final class EmoteStage {
         for (_, target, _, limit) in face.inertiaFromChange { limits[target] = max(limits[target] ?? 0, limit) }
         for (name, m) in face.materials {
             var s = a.springs[name] ?? (0, 0)
-            s.x += (kicks[name] ?? 0) * (m.inverted ? -1 : 1)
+            let bust = name.lowercased().contains("bust") ? bustInertia : 1
+            s.x += (kicks[name] ?? 0) * (m.inverted ? -1 : 1) * bust
             // Integrated in small steps for stability: a = (−k·x − c·v) / m.
             let steps = max(1, Int((frames * 4).rounded(.up)))
             let h = frames * m.step / Double(steps)

@@ -111,3 +111,27 @@ public final class CatSystemGame: @unchecked Sendable {
         return reader.values
     }
 }
+
+extension CatSystemGame {
+    /// `nametable.csv` (`config.int`): each speaker as the scenes name them (Japanese) to the
+    /// number of their name picture in `sys_meswnd_name_%LANG%` (Chocola 0, Vanilla 1 …).
+    public func speakerTable() -> [String: Int] {
+        guard let bytes = (try? file(named: "nametable.csv")) ?? nil else { return [:] }
+        let text = String(data: Data(bytes), encoding: .utf8) ?? String(data: Data(bytes), encoding: cp932) ?? ""
+        var table: [String: Int] = [:]
+        for line in text.split(whereSeparator: \.isNewline) {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            var id: Int?, name: String?
+            if fields.count >= 2, let n = Int(fields[0].trimmingCharacters(in: .whitespaces)) {
+                id = n
+                name = fields[1].trimmingCharacters(in: .whitespaces)
+            } else if let space = line.firstIndex(of: " ") {
+                // One row has a space where the tab should be (`115 女の子１`).
+                id = Int(line[..<space])
+                name = line[line.index(after: space)...].split(separator: "\t").first.map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+            if let id, let name, !name.isEmpty, table[name] == nil { table[name] = id }
+        }
+        return table
+    }
+}

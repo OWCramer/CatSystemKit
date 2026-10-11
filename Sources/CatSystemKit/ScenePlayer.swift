@@ -31,6 +31,8 @@ public final class ScenePlayer {
         /// The text as the scene has it (Japanese), for when a translation is missing.
         public let original: String
         public let voice: String?
+        /// The speaker as the scene has it (Japanese), as `nametable.csv` names speakers.
+        public var originalSpeaker: String? = nil
     }
 
     public enum Event: Sendable {
@@ -266,7 +268,8 @@ public final class ScenePlayer {
         let name = translated.map(\.name) ?? speaker
         let message = Message(scene: frame.name, index: frame.messageIndex,
                               speaker: (name?.isEmpty ?? true) ? nil : name,
-                              text: Self.clean(translated?.text ?? text), original: text, voice: pendingVoice)
+                              text: Self.clean(translated?.text ?? text), original: text, voice: pendingVoice,
+                              originalSpeaker: speaker)
         frame.messageIndex += 1
         pendingVoice = nil
         pending.append(.message(message))

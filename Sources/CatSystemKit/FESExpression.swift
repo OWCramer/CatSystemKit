@@ -10,10 +10,17 @@ protocol FESContext: AnyObject {
     func setLocal(_ index: Int, _ value: Int)
     func system(_ name: String) -> Int?
     func macro(_ name: String) -> String?
+    /// An object's handle (`btn_sys`, `btn[2]`), compared with `_CLICK_L_`.
+    func objectHandle(_ name: String, index: Int?) -> Int?
 }
 
-/// FES integer expressions: C precedence over `|| && == != < <= > >= + - * / %`, unary
-/// `- !`, parentheses, decimal and `0x` numbers, `$n`, `\n`, `$(expr)`, `\(expr)`.
+extension FESContext {
+    func objectHandle(_ name: String, index: Int?) -> Int? { nil }
+}
+
+/// FES integer expressions: C precedence over `|| && | & == != < <= > >= << >> + - * / %`,
+/// unary `- !`, parentheses, decimal and `0x` numbers, `$n`, `\n`, `$(expr)`, `\(expr)`, and
+/// object names (`btn_sys`, `btn[0]`) as handles.
 struct FESExpression {
     private let chars: [Character]
     private var at = 0
@@ -48,9 +55,28 @@ struct FESExpression {
     }
 
     private mutating func and() -> Int {
-        var v = equality()
-        while take("&&") { let r = equality(); v = (v != 0 && r != 0) ? 1 : 0 }
+        var v = bitOr()
+        while take("&&") { let r = bitOr(); v = (v != 0 && r != 0) ? 1 : 0 }
         return v
+    }
+
+    private mutating func bitOr() -> Int {
+        var v = bitAnd()
+        while peekSingle("|") { at += 1; v |= bitAnd() }
+        return v
+    }
+
+    private mutating func bitAnd() -> Int {
+        var v = equality()
+        while peekSingle("&") { at += 1; v &= equality() }
+        return v
+    }
+
+    /// `|` or `&` alone (not `||`, `&&`, `|=`).
+    private mutating func peekSingle(_ c: Character) -> Bool {
+        skip()
+        guard at < chars.count, chars[at] == c else { return false }
+        return at + 1 >= chars.count || (chars[at + 1] != c && chars[at + 1] != "=")
     }
 
     private mutating func equality() -> Int {
@@ -61,10 +87,18 @@ struct FESExpression {
     }
 
     private mutating func relation() -> Int {
+        var v = shift()
+        while true {
+            if take("<=") { v = v <= shift() ? 1 : 0 } else if take(">=") { v = v >= shift() ? 1 : 0 }
+            else if take("<<") || take(">>") { at -= 2; return v }
+            else if take("<") { v = v < shift() ? 1 : 0 } else if take(">") { v = v > shift() ? 1 : 0 } else { return v }
+        }
+    }
+
+    private mutating func shift() -> Int {
         var v = sum()
         while true {
-            if take("<=") { v = v <= sum() ? 1 : 0 } else if take(">=") { v = v >= sum() ? 1 : 0 }
-            else if take("<") { v = v < sum() ? 1 : 0 } else if take(">") { v = v > sum() ? 1 : 0 } else { return v }
+            if take("<<") { v = v << max(0, min(63, sum())) } else if take(">>") { v = v >> max(0, min(63, sum())) } else { return v }
         }
     }
 
@@ -126,6 +160,13 @@ struct FESExpression {
         }
         if let v = context.system(word) { return v }
         if let m = context.macro(word) { return FESExpression.evaluate(m, context) }
+        var index: Int?
+        if at < chars.count, chars[at] == "[" {
+            at += 1
+            index = or()
+            _ = take("]")
+        }
+        if let handle = context.objectHandle(word, index: index) { return handle }
         return 0
     }
 
