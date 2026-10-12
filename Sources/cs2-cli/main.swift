@@ -30,7 +30,9 @@ import UniformTypeIdentifiers
 ///   cs2-cli emotecompare <base> <spec> [m2body] [scale] [out prefix]  the CPU and Metal drawings compared
 ///   cs2-cli emoteinfo <base> <model>               a model's variables, timelines and metadata
 ///   cs2-cli animate <base> <out dir> --from SCENE [--lines N] [--seconds S] [--fps F] [--metal]  characters over time
-/// Options: --key <passphrase> or --namekey <0xHEX> instead of recovering the name key.
+///   cs2-cli which <base folder> <file> …          where each file is found (patch or archive)
+/// Options: --key <passphrase> or --namekey <0xHEX> instead of recovering the name key;
+/// --patch <folder> lays a patch folder over the game, as the app does with `patch/`.
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
@@ -47,6 +49,7 @@ let hexKey = option("--namekey").flatMap { UInt32($0.replacingOccurrences(of: "0
 let language = option("--lang")
 let clickList = option("--click")
 let givenKey = hexKey ?? passphrase.map(CS2Passphrase.key)
+let patchFolder = option("--patch").map { URL(fileURLWithPath: $0, isDirectory: true) }
 let stopNative = option("--stop").flatMap { Int($0, radix: 16) }
 let savePath = option("--save")
 var stringVariables: [Int: String] = [:]
@@ -85,7 +88,7 @@ func archive(_ path: String) -> KIFArchive {
 }
 
 func game(_ path: String) -> CatSystemGame {
-    do { return try CatSystemGame(root: URL(fileURLWithPath: path), nameKey: givenKey) } catch { fail("\(error)") }
+    do { return try CatSystemGame(root: URL(fileURLWithPath: path), patch: patchFolder, nameKey: givenKey) } catch { fail("\(error)") }
 }
 
 func file(_ game: CatSystemGame, _ name: String) -> [UInt8] {
@@ -272,6 +275,12 @@ case "names":
     for kif in game(path).archives where rest.count < 2 || kif.url.lastPathComponent == rest[1] {
         for e in kif.entries { print(kif.url.lastPathComponent, e.name, e.size, separator: "\t") }
     }
+
+case "which":
+    // Where each named file is found (a loose file in --patch, or an archive).
+    guard rest.count >= 2 else { fail("which <base> <file> … [--patch <folder>]") }
+    let g = game(rest[0])
+    for name in rest.dropFirst() { print(name, g.source(of: name) ?? "not found", separator: "\t") }
 
 case "streamcheck":
     // Reads a file in odd-sized pieces (as the movie player does) and compares them with the

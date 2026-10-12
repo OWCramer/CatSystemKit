@@ -1,7 +1,8 @@
 import Foundation
 
 /// A CatSystem2 game folder: `startup.xml` (screen size, title, `image.lst`), and every `.int`
-/// archive beside the executable, searched by file name. Names inside encrypted archives
+/// archive beside the executable, searched by file name, with a patch folder's loose files
+/// and archives over them. Names inside encrypted archives
 /// are unscrambled with the game's name key, recovered from the archives on first open
 /// (`KIFArchive.recoverNameKey`) unless the caller already has it.
 public final class CatSystemGame: @unchecked Sendable {
@@ -11,8 +12,13 @@ public final class CatSystemGame: @unchecked Sendable {
     public let screenWidth: Int
     public let screenHeight: Int
     public let title: String?
-    /// Lowercased file name to (archive, entry), the first archive in file order winning.
+    /// The patch folder laid over `root`, if any.
+    public let patch: URL?
+    /// Lowercased file name to (archive, entry): among the game's own archives the first in
+    /// file order wins; `patch`'s archives win over those, the last by name winning.
     private let index: [String: (archive: Int, entry: KIFArchive.Entry)]
+    /// Lowercased file name to a loose file in `patch`, found before any archive's.
+    private let loose: [String: URL]
 
     public enum Failure: Error, CustomStringConvertible {
         case notCatSystem(URL)
@@ -26,13 +32,26 @@ public final class CatSystemGame: @unchecked Sendable {
         }
     }
 
-    public init(root: URL, nameKey: UInt32? = nil) throws {
+    /// `root` is the game as delivered (`base/`); `patch`, if given, is laid over it (spec, Game
+    /// folders and patching): a loose file there is found before any archive's, an `.int`
+    /// there replaces the game's archive of that name, and an extra `.int` joins them. Archives
+    /// from `patch` win over the game's, a later one (by name) over an earlier one.
+    public init(root: URL, patch: URL? = nil, nameKey: UInt32? = nil) throws {
         self.root = root
+        self.patch = patch
         let fm = FileManager.default
-        let files = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-        let ints = files.filter { $0.pathExtension.lowercased() == "int" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        func intFiles(_ folder: URL?) -> [URL] {
+            guard let folder else { return [] }
+            return ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension.lowercased() == "int" && !$0.lastPathComponent.hasPrefix(".") }
+                .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+        }
+        let patchInts = intFiles(patch)
+        let replaced = Set(patchInts.map { $0.lastPathComponent.lowercased() })
+        let baseInts = intFiles(root).filter { !replaced.contains($0.lastPathComponent.lowercased()) }
+        let ints = baseInts + patchInts
         guard !ints.isEmpty else { throw Failure.notCatSystem(root) }
+        let patchArchiveURLs = Set(patchInts)
         var archives = try ints.map { try KIFArchive(url: $0) }
         var key = nameKey
         if key == nil, archives.contains(where: { $0.isEncrypted }) {
@@ -50,13 +69,29 @@ public final class CatSystemGame: @unchecked Sendable {
 
         var index: [String: (archive: Int, entry: KIFArchive.Entry)] = [:]
         for (a, archive) in archives.enumerated() {
-            for entry in archive.entries where index[entry.name.lowercased()] == nil {
+            let fromPatch = patchArchiveURLs.contains(archive.url)
+            for entry in archive.entries where fromPatch || index[entry.name.lowercased()] == nil {
                 index[entry.name.lowercased()] = (a, entry)
             }
         }
         self.index = index
 
-        let startup = Self.startup(root.appendingPathComponent("config/startup.xml"))
+        // Loose files anywhere in patch/ (not its archives), by file name as the archives
+        // are searched.
+        var loose: [String: URL] = [:]
+        if let patch, let walker = fm.enumerator(at: patch, includingPropertiesForKeys: [.isRegularFileKey],
+                                                 options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker where url.pathExtension.lowercased() != "int" {
+                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+                let key = url.lastPathComponent.lowercased()
+                if loose[key] == nil { loose[key] = url }
+            }
+        }
+        self.loose = loose
+
+        let patchedStartup = patch?.appendingPathComponent("config/startup.xml")
+        let startup = Self.startup(patchedStartup.flatMap { fm.fileExists(atPath: $0.path) ? $0 : nil }
+            ?? root.appendingPathComponent("config/startup.xml"))
         screenWidth = Int(startup["SCREEN/width"] ?? "") ?? 1280
         screenHeight = Int(startup["SCREEN/height"] ?? "") ?? 720
         title = startup["APP/title"]
@@ -64,15 +99,31 @@ public final class CatSystemGame: @unchecked Sendable {
 
     /// A file by name (`op.cst`, `bg01a.hg3`), searched across every archive.
     public func file(named name: String) throws -> [UInt8]? {
+        if let url = loose[name.lowercased()] { return [UInt8](try Data(contentsOf: url)) }
         guard let hit = index[name.lowercased()] else { return nil }
         return try archives[hit.archive].data(for: hit.entry)
     }
 
-    public func contains(_ name: String) -> Bool { index[name.lowercased()] != nil }
+    public func contains(_ name: String) -> Bool { loose[name.lowercased()] != nil || index[name.lowercased()] != nil }
+
+    /// Where a file is found: a loose file in `patch`, or the archive holding it (paths).
+    public func source(of name: String) -> String? {
+        if let url = loose[name.lowercased()] { return url.path }
+        return index[name.lowercased()].map { archives[$0.archive].url.path }
+    }
 
     /// A file read a piece at a time (a movie of 130 MB), deciphered in memory: its size, and
     /// a reader of `count` bytes from an offset.
     public func stream(named name: String) -> (size: Int, read: @Sendable (Int, Int) -> [UInt8]?)? {
+        if let url = loose[name.lowercased()] {
+            guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int else { return nil }
+            return (size, { offset, count in
+                guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+                defer { try? handle.close() }
+                guard (try? handle.seek(toOffset: UInt64(max(0, offset)))) != nil else { return nil }
+                return (try? handle.read(upToCount: count)).map { [UInt8]($0) } ?? []
+            })
+        }
         guard let hit = index[name.lowercased()] else { return nil }
         let archive = archives[hit.archive], entry = hit.entry
         return (entry.size, { offset, count in try? archive.read(entry, at: offset, count: count) })
@@ -80,8 +131,9 @@ public final class CatSystemGame: @unchecked Sendable {
 
     /// Every file name with the given extension, sorted.
     public func names(withExtension ext: String) -> [String] {
-        archives.flatMap(\.entries).map(\.name)
-            .filter { $0.lowercased().hasSuffix("." + ext.lowercased()) }
+        var seen = Set<String>()
+        return (loose.values.map(\.lastPathComponent) + archives.flatMap(\.entries).map(\.name))
+            .filter { $0.lowercased().hasSuffix("." + ext.lowercased()) && seen.insert($0.lowercased()).inserted }
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
