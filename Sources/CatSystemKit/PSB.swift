@@ -88,17 +88,20 @@ public final class PSBFile {
     private var chunkData = 0
 
     /// Reads a `.psz` (`PSZ\0`, zlib length, inflated length, reserved, zlib stream) or a PSB.
-    public convenience init(psz: [UInt8]) throws {
+    public convenience init(psz: [UInt8], bodySeed: UInt32? = nil) throws {
         if psz.count >= 16, psz[0] == 0x50, psz[1] == 0x53, psz[2] == 0x5A, psz[3] == 0 {
             let packed = Int(Self.u32(psz, 4)), size = Int(Self.u32(psz, 8))
             guard 16 + packed <= psz.count else { throw Failure.truncated("psz") }
-            try self.init(Zlib.inflate(psz[16..<(16 + packed)], size: size))
+            try self.init(Zlib.inflate(psz[16..<(16 + packed)], size: size), bodySeed: bodySeed)
         } else {
-            try self.init(psz)
+            try self.init(psz, bodySeed: bodySeed)
         }
     }
 
-    public init(_ data: [UInt8]) throws {
+    /// `bodySeed`: the title's seed for a version 2 PSB whose name and string tables are
+    /// encrypted (E-mote 3 models in KiriKiri games), when already known; nil finds it
+    /// from the file (see `findBodySeed`).
+    public init(_ data: [UInt8], bodySeed: UInt32? = nil) throws {
         guard data.count >= 0x38, data[0] == 0x50, data[1] == 0x53, data[2] == 0x42, data[3] == 0 else { throw Failure.notPSB }
         var bytes = data
         version = Int(bytes[4]) | Int(bytes[5]) << 8
@@ -110,6 +113,19 @@ public final class PSBFile {
             let seed = Self.recoverSeed(firstWord: Self.u32(bytes, 8) ^ known)
             var stream = EmoteKeystream(seed: seed)
             for i in 8..<(8 + 4 * headerWords) { bytes[i] ^= stream.next() }
+            self.seed = seed
+        }
+        if version == 2, !Self.tablesReadable(bytes) {
+            // The tables from offsetEncrypt up to the chunk offsets are under the keystream,
+            // started afresh there.
+            let seed: UInt32
+            if let bodySeed, Self.seedFits(bodySeed, bytes) { seed = bodySeed }
+            else if let found = Self.findBodySeed(bytes) { seed = found }
+            else { throw Failure.truncated("encrypted tables (no seed found)") }
+            let start = Int(Self.u32(bytes, 8)), end = Int(Self.u32(bytes, 24))
+            guard start < end, end <= bytes.count else { throw Failure.truncated("encrypted range") }
+            var stream = EmoteKeystream(seed: seed)
+            for i in start..<end { bytes[i] ^= stream.next() }
             self.seed = seed
         }
         self.bytes = bytes
@@ -169,6 +185,62 @@ public final class PSBFile {
         let t = x ^ (x << 11)
         let y = firstWord ^ t ^ (t >> 8)
         return y ^ (y >> 19)
+    }
+
+    /// Where the name arrays must end: the next part the header places after them (the
+    /// strings, or in version 2 files the root, which comes first).
+    static func namesEnd(_ b: [UInt8]) -> Int? {
+        let names = Int(u32(b, 12))
+        let next = [16, 20, 24, 28, 32, 36].map { Int(u32(b, $0)) }.filter { $0 > names }.min()
+        guard let next, next <= b.count else { return nil }
+        return next
+    }
+
+    /// Whether the three name arrays read cleanly up to the part after them.
+    static func tablesReadable(_ b: [UInt8]) -> Bool {
+        let names = Int(u32(b, 12))
+        guard let end = namesEnd(b) else { return false }
+        var plain = PlainBytes(bytes: b)
+        return arraysEnd(&plain, at: names, count: 3, limit: end) == end
+    }
+
+    /// Whether `seed` decrypts this file's tables.
+    static func seedFits(_ seed: UInt32, _ b: [UInt8]) -> Bool {
+        let names = Int(u32(b, 12)), start = Int(u32(b, 8))
+        guard start == names, let end = namesEnd(b) else { return false }
+        var keyed = KeyedBytes(bytes: b, start: names, stream: EmoteKeystream(seed: seed))
+        return arraysEnd(&keyed, at: names, count: 3, limit: end) == end
+    }
+
+    /// The seed of a version 2 PSB's encrypted tables, found from the file alone: the
+    /// first four bytes at the name offset are an array header (type, count, then the
+    /// width or more count), so each plausible header gives the keystream's first word and
+    /// from it a seed; the right one makes all three name arrays end exactly where the
+    /// header's next part begins. Nothing is read from the game's program. (A title uses
+    /// one seed: callers keep it and pass it as `bodySeed` for the rest.)
+    public static func findBodySeed(_ b: [UInt8]) -> UInt32? {
+        guard b.count >= 0x28, Int(b[4]) | Int(b[5]) << 8 == 2 else { return nil }
+        let start = Int(u32(b, 8)), names = Int(u32(b, 12))
+        guard start == names, let strings = namesEnd(b), names + 8 < strings else { return nil }
+        let first = u32(b, names)
+        func check(_ plain: UInt32) -> UInt32? {
+            let seed = recoverSeed(firstWord: first ^ plain)
+            var keyed = KeyedBytes(bytes: b, start: names, stream: EmoteKeystream(seed: seed))
+            // The first two arrays must read before the whole table is tried.
+            guard arraysEnd(&keyed, at: names, count: 2, limit: strings) != nil else { return nil }
+            return seedFits(seed, b) ? seed : nil
+        }
+        for width in UInt32(0x0D)...0x10 {
+            // One count byte: type, count, width, first entry's low byte.
+            for count in UInt32(1)...255 { for entry in UInt32(0)...255 {
+                if let s = check(0x0D | count << 8 | width << 16 | entry << 24) { return s }
+            } }
+            // Two count bytes: type, count, width.
+            for count in UInt32(1)...0xFFFF {
+                if let s = check(0x0E | count << 8 | width << 24) { return s }
+            }
+        }
+        return nil
     }
 
     private func uint(_ p: Int, _ n: Int) -> Int {
@@ -244,23 +316,23 @@ public final class PSBFile {
     }
 }
 
-/// E-mote's PSB keystream: xorshift128, four bytes per output word, low byte first.
+/// E-mote's PSB keystream: xorshift128, an output word's bytes low first. A new word is
+/// drawn once what is left of the last one has shifted down to zero, so a word whose top
+/// bytes are zero gives fewer than four (as M2's decrypter does).
 struct EmoteKeystream {
     private var x: UInt32 = 0x075B_CD15, y: UInt32 = 0x159A_55E5, z: UInt32 = 0x1F12_3BB5, w: UInt32
     private var word: UInt32 = 0
-    private var left = 0
 
     init(seed: UInt32) { w = seed }
 
     mutating func next() -> UInt8 {
-        if left == 0 {
+        if word == 0 {
             let t = x ^ (x << 11)
             x = y; y = z; z = w
             w = t ^ w ^ ((t ^ (w >> 11)) >> 8)
             word = w
-            left = 4
         }
-        defer { word >>= 8; left -= 1 }
+        defer { word >>= 8 }
         return UInt8(truncatingIfNeeded: word)
     }
 }

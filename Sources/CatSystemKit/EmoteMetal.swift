@@ -172,6 +172,8 @@ public final class EmoteGPU: @unchecked Sendable {
         let nodes: MTLBuffer
         let meshes: MTLBuffer
         let masks: [(texture: MTLTexture, x: Float, y: Float)?]
+        /// How many images it draws.
+        public var itemCount: Int { list.items.count }
     }
 
     struct ItemUniforms {

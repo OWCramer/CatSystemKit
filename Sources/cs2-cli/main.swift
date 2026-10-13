@@ -728,6 +728,56 @@ case "emotecompare":
         writePNG(diff, width: cpu.width, height: cpu.height, to: URL(fileURLWithPath: rest[4] + "-diff.png"))
     }
 
+case "psbemote":
+    // psbemote <model.psb> <out.png> [scale]: a bare E-mote PSB (a KiriKiri game's) drawn
+    // at rest on grey, with its variables and timelines listed.
+    guard rest.count >= 2 else { fail("psbemote <model.psb> <out.png> [scale]") }
+    guard let bytes = FileManager.default.contents(atPath: rest[0]) else { fail("can't read \(rest[0])") }
+    let psb: PSBFile
+    do { psb = try PSBFile(psz: [UInt8](bytes)) } catch { fail("\(error)") }
+    print("PSB v\(psb.version) seed \(psb.seed); root keys:", psb.root.dictionary?.keys.sorted().joined(separator: " ") ?? "none")
+    if let id = psb.root["id"] { print("id", id) }
+    if let path = ProcessInfo.processInfo.environment["CS2_PSB"] {
+        // CS2_PSB="source/body_parts": that value as stored (resources as indices).
+        var v: PSBFile.Value? = psb.root
+        for key in path.split(separator: "/") {
+            if let i = Int(key), let l = v?.list, i < l.count { v = l[i] } else { v = v?[String(key)] }
+        }
+        print(String(String(describing: v ?? .null).prefix(4000)))
+    }
+    let model: EmoteModel
+    do { model = try EmoteModel(psb: psb) } catch { fail("model: \(error)") }
+    print("base \(model.baseObject)/\(model.baseMotion); \(model.objects.count) objects; \(model.textures.count) textures; \(model.variableNames.count) variables; timelines:",
+          model.timelines.keys.sorted().joined(separator: ", "))
+    for (name, s) in model.sources.sorted(by: { $0.key < $1.key }).prefix(4) {
+        print("source \(name): texture \(s.texture.map { "\($0.width)×\($0.height)" } ?? "none"), \(s.icons.count) icons")
+    }
+    let renderer = EmoteRenderer(model: model)
+    var variables = model.restingVariables()
+    if let set = ProcessInfo.processInfo.environment["CS2_SET"] {
+        for pair in set.split(separator: ",") {
+            let kv = pair.split(separator: "=")
+            if kv.count == 2, let v = Double(kv[1]) { variables[String(kv[0])] = v }
+        }
+    }
+    model.applySelectors(&variables)
+    var ranges: [String: (Double, Double)] = [:]
+    for (_, motions) in model.objects { for (_, motion) in motions { for p in motion.parameters {
+        let r = ranges[p.id] ?? (p.rangeBegin, p.rangeEnd)
+        ranges[p.id] = (min(r.0, p.rangeBegin, p.rangeEnd), max(r.1, p.rangeBegin, p.rangeEnd))
+    } } }
+    print("variables:", model.variableNames.map { n in "\(n)\(ranges[n].map { "[\($0.0)…\($0.1)]" } ?? "")" }.joined(separator: " "))
+    let image = renderer.render(variables: variables, scale: rest.count > 2 ? Double(rest[2]) ?? 1 : 1)
+    print("drawn \(image.width)×\(image.height) origin \(image.originX),\(image.originY)")
+    guard image.width > 0 else { fail("nothing drawn") }
+    var flat = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    for i in 0..<(image.width * image.height) {
+        let a = Int(image.rgba[i * 4 + 3])
+        for c in 0..<3 { flat[i * 4 + c] = UInt8(min(255, Int(image.rgba[i * 4 + c]) + 96 * (255 - a) / 255)) }
+        flat[i * 4 + 3] = 255
+    }
+    writePNG(flat, width: image.width, height: image.height, to: URL(fileURLWithPath: rest[1]))
+
 case "emoteinfo":
     // emoteinfo <base> <model>: a model's variables, the parameters that read them, and its
     // timelines (idle loops) with their tracks.
