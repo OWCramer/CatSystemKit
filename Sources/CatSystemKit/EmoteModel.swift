@@ -239,9 +239,13 @@ public final class EmoteModel {
 
     private static func layer(_ value: PSBFile.Value) -> Layer {
         let type = value["type"]?.int ?? 0
-        let frames = (value["frameList"]?.list ?? []).map { f in
+        var frames = (value["frameList"]?.list ?? []).map { f in
             Frame(time: f["time"]?.number ?? 0, type: f["type"]?.int ?? 0,
                   content: f["content"].map { content($0, layerType: type) } ?? Content())
+        }
+        // In time order (they come so; the renderer finds a time's frame by binary search).
+        if zip(frames, frames.dropFirst()).contains(where: { $0.time > $1.time }) {
+            frames = frames.enumerated().sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }.map(\.element)
         }
         return Layer(label: value["label"]?.string ?? "", type: type, parameterize: value["parameterize"]?.int,
                      maskLabels: (value["stencilCompositeMaskLayerList"]?.list ?? []).compactMap(\.string),

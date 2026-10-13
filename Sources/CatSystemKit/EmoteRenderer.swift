@@ -24,8 +24,34 @@ public final class EmoteRenderer: @unchecked Sendable {
     /// Collects shape layers while a pose is evaluated (for `shapes`).
     private var shapeSink: ((EmoteModel.Layer, Node) -> Void)?
 
+    /// Labels some stencil masks with: only their items are collected per layer.
+    private let maskLabels: Set<String>
+    /// Blank layers' boxes by their `w:h:ox:oy` text (parsed once).
+    private var blankBoxes: [String: EmoteModel.Icon?] = [:]
+    private let blankLock = NSLock()
+
     public init(model: EmoteModel) {
         self.model = model
+        var labels = Set<String>()
+        func collect(_ layers: [EmoteModel.Layer]) {
+            for layer in layers {
+                labels.formUnion(layer.maskLabels)
+                collect(layer.children)
+            }
+        }
+        for motions in model.objects.values {
+            for motion in motions.values { collect(motion.layers) }
+        }
+        maskLabels = labels
+    }
+
+    private func blankBox(_ text: String) -> EmoteModel.Icon? {
+        blankLock.lock()
+        defer { blankLock.unlock() }
+        if let hit = blankBoxes[text] { return hit }
+        let box = Self.blankBox(text)
+        blankBoxes[text] = box
+        return box
     }
 
     // MARK: Evaluation
@@ -86,8 +112,10 @@ public final class EmoteRenderer: @unchecked Sendable {
         let divisions: Int
         let opacity: Double
         let clips: [Stencil]
+        let motionName: String
+        let layerLabel: String
         /// `motion/layer`, for listings.
-        let label: String
+        var label: String { motionName + "/" + layerLabel }
     }
 
     /// The items `render` would draw, back to front: label, icon, place and stencils.
@@ -129,13 +157,18 @@ public final class EmoteRenderer: @unchecked Sendable {
     func items(variables: [String: Double], time: Double, root: Node) -> (items: [Item], instances: [Instance]) {
         guard let motion = model.objects[model.baseObject]?[model.baseMotion] else { return ([], []) }
         var instances: [Instance] = []
-        let items = evaluate(motion, named: model.baseMotion, time: time, parent: root, clips: [], variables: variables, instances: &instances, depth: 0)
+        var items: [Item] = []
+        items.reserveCapacity(256)
+        evaluate(motion, named: model.baseMotion, time: time, parent: root, clips: [], variables: variables,
+                 instances: &instances, depth: 0, into: &items)
         return (items, instances)
     }
 
+    /// Appends the motion's items to `out`, back to front in tree order (no copies of partial
+    /// lists: drawing several characters a frame spends its time here).
     private func evaluate(_ motion: EmoteModel.Motion, named motionName: String, time: Double, parent: Node, clips: [Stencil],
-                          variables: [String: Double], instances: inout [Instance], depth: Int) -> [Item] {
-        guard depth < 16 else { return [] }
+                          variables: [String: Double], instances: inout [Instance], depth: Int, into out: inout [Item]) {
+        guard depth < 16 else { return }
         let instance = Instance()
         instances.append(instance)
 
@@ -155,16 +188,15 @@ public final class EmoteRenderer: @unchecked Sendable {
             return normalized * end
         }
 
-        @discardableResult
-        func visit(_ layer: EmoteModel.Layer, parent: Node, clips: [Stencil]) -> [Item] {
+        func visit(_ layer: EmoteModel.Layer, parent: Node, clips: [Stencil], into out: inout [Item]) {
             let state = Self.state(layer, at: layerTime(layer))
-            var items: [Item] = []
-            guard state != nil || layer.type == 2 else { return [] }
+            guard state != nil || layer.type == 2 else { return }
+            let first = out.count
             let content = state ?? EmoteModel.Content()
             let src = content.src ?? ""
             var bends = content.mesh != nil
             var icon: EmoteModel.Icon?
-            if layer.type == 0, src == "blank", let i = content.icon { icon = Self.blankBox(i) }
+            if layer.type == 0, src == "blank", let i = content.icon { icon = blankBox(i) }
             if layer.type == 0, src != "blank", let i = content.icon { icon = model.sources[src]?.icons[i] }
             if icon == nil { bends = false }
             let node = Node(parent: parent, bends: bends)
@@ -178,42 +210,50 @@ public final class EmoteRenderer: @unchecked Sendable {
             node.z = parent.z + content.z
             if state != nil, layer.type == 1, layer.shape != nil { shapeSink?(layer, node) }
 
-            var own: [Item] = []
             if state != nil {
                 switch layer.type {
                 case 0 where src != "blank":
                     if let icon, let source = model.sources[src], let texture = source.texture,
                        let textureIndex = source.textureIndex, node.opacity > 0 {
-                        own.append(Item(node: node, texture: texture, textureIndex: textureIndex, icon: icon,
+                        out.append(Item(node: node, texture: texture, textureIndex: textureIndex, icon: icon,
                                         divisions: node.bent ? max(1, min(32, layer.meshDivision)) : 1,
-                                        opacity: node.opacity, clips: clips, label: motionName + "/" + layer.label))
+                                        opacity: node.opacity, clips: clips, motionName: motionName, layerLabel: layer.label))
                     }
                 case 3:
                     if let object = content.src, let name = content.icon, let sub = model.objects[object]?[name] {
-                        own = evaluate(sub, named: name, time: time + content.timeOffset, parent: node, clips: clips,
-                                       variables: variables, instances: &instances, depth: depth + 1)
+                        evaluate(sub, named: name, time: time + content.timeOffset, parent: node, clips: clips,
+                                 variables: variables, instances: &instances, depth: depth + 1, into: &out)
                     }
                 default:
                     break
                 }
             }
-            items += own
 
             var childClips = clips
             if layer.type == 12, state != nil, !layer.maskLabels.isEmpty {
                 childClips.append(Stencil(labels: layer.maskLabels, instance: instance))
             }
-            for child in layer.children { items += visit(child, parent: node, clips: childClips) }
-            instance.subtree[layer.label, default: []] += items
-            return items
+            for child in layer.children { visit(child, parent: node, clips: childClips, into: &out) }
+            // Only labels a stencil masks with need their subtree's items.
+            if maskLabels.contains(layer.label), out.count > first {
+                instance.subtree[layer.label, default: []] += out[first...]
+            }
         }
 
-        return motion.layers.flatMap { visit($0, parent: parent, clips: clips) }
+        for layer in motion.layers { visit(layer, parent: parent, clips: clips, into: &out) }
     }
 
     /// A frame list's content at `time`, or nil when nothing shows then.
     static func state(_ layer: EmoteModel.Layer, at time: Double) -> EmoteModel.Content? {
-        guard let i = layer.frames.lastIndex(where: { $0.time <= time }) else { return nil }
+        // The last frame at or before `time` (frames are in time order): a binary search.
+        let frames = layer.frames
+        var lo = 0, hi = frames.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if frames[mid].time <= time { lo = mid + 1 } else { hi = mid }
+        }
+        guard lo > 0 else { return nil }
+        let i = lo - 1
         let a = layer.frames[i]
         guard a.type != 0 else { return nil }
         guard a.type == 3, i + 1 < layer.frames.count else { return a.content }

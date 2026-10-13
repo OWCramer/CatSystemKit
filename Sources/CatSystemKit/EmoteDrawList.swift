@@ -97,8 +97,12 @@ extension EmoteRenderer {
                     // The mask's extent, from its grid (masks are few and small).
                     let n = item.divisions
                     var b = (minX: Float.infinity, minY: Float.infinity, maxX: -Float.infinity, maxY: -Float.infinity)
+                    // The grid's edge at every point, its inside every fourth: the bounds come
+                    // from the edge (inner points rarely reach past it) at an eighth of the cost,
+                    // which counted with several characters on screen.
                     for j in 0...n {
-                        for i in 0...n {
+                        let edgeRow = j == 0 || j == n
+                        for i in 0...n where edgeRow || i == 0 || i == n || (i % 4 == 0 && j % 4 == 0) {
                             let p = item.node.toRoot(Double(item.icon.width) * Double(i) / Double(n) - item.icon.originX,
                                                      Double(item.icon.height) * Double(j) / Double(n) - item.icon.originY)
                             b.minX = min(b.minX, Float(p.0)); b.maxX = max(b.maxX, Float(p.0))
@@ -111,7 +115,7 @@ extension EmoteRenderer {
                 }
             }
             let i = list.stencils.count
-            list.stencils.append(.init(items: maskItems, minX: minX - 2, minY: minY - 2, maxX: maxX + 2, maxY: maxY + 2))
+            list.stencils.append(.init(items: maskItems, minX: minX - 4, minY: minY - 4, maxX: maxX + 4, maxY: maxY + 4))
             stencilIndex[key] = i
             return i
         }
