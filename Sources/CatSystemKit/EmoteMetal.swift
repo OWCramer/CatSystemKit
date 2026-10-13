@@ -20,8 +20,11 @@ public final class EmoteGPU: @unchecked Sendable {
     private let sampler: MTLSamplerState
     private let plainSampler: MTLSamplerState
     private let lock = NSLock()
-    private var textures: [ObjectIdentifier: [MTLTexture]] = [:]
-    private var textureOrder: [ObjectIdentifier] = []
+    // Keyed by the model's identity, not its address: a model freed and another allocated at
+    // the same address drew with the first one's atlas (NEKOPARA Vol. 0's third character in
+    // scattered pieces once several models had come and gone).
+    private var textures: [UInt64: [MTLTexture]] = [:]
+    private var textureOrder: [UInt64] = []
     private var pool: [String: [MTLTexture]] = [:]
     /// Mipmapped, trilinear sampling (on); off samples the base level only, as the CPU does.
     public let mipmaps: Bool
@@ -66,12 +69,12 @@ public final class EmoteGPU: @unchecked Sendable {
 
     // MARK: Textures
 
-    private var uploading: Set<ObjectIdentifier> = []
+    private var uploading: Set<UInt64> = []
 
     /// Whether the model's textures are on the GPU; if not, they are uploaded in the
     /// background (so a frame never waits for a large atlas).
     public func texturesReady(for model: EmoteModel) -> Bool {
-        let key = ObjectIdentifier(model)
+        let key = model.identity
         lock.lock()
         let ready = textures[key] != nil
         let start = !ready && !uploading.contains(key)
@@ -89,7 +92,7 @@ public final class EmoteGPU: @unchecked Sendable {
 
     /// The model's textures on the GPU (uploaded on first use; the last few models kept).
     public func textures(for model: EmoteModel) -> [MTLTexture]? {
-        let key = ObjectIdentifier(model)
+        let key = model.identity
         lock.lock()
         if let hit = textures[key] {
             textureOrder.removeAll { $0 == key }

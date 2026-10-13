@@ -18,6 +18,18 @@ import Foundation
 /// timelines that animate them (`timelineControl`: `初期化`, `差分用_waiting_loop` …) and
 /// selectors (`arm_type` picks one of `fade_a`…`fade_e`).
 public final class EmoteModel {
+    /// Unique for the life of the process (never reused, unlike an object's address): caches
+    /// that outlive a model (its GPU textures) are keyed by it.
+    public let identity: UInt64 = EmoteModel.nextIdentity()
+    private static let identityLock = NSLock()
+    nonisolated(unsafe) private static var lastIdentity: UInt64 = 0
+    private static func nextIdentity() -> UInt64 {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        lastIdentity += 1
+        return lastIdentity
+    }
+
     public struct Icon {
         public let left: Int, top: Int, width: Int, height: Int
         public let originX: Double, originY: Double
