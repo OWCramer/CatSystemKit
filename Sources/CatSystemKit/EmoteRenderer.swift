@@ -21,6 +21,8 @@ public struct EmoteImage: Sendable {
 /// coverage of their mask layers.
 public final class EmoteRenderer: @unchecked Sendable {
     public let model: EmoteModel
+    /// Collects shape layers while a pose is evaluated (for `shapes`).
+    private var shapeSink: ((EmoteModel.Layer, Node) -> Void)?
 
     public init(model: EmoteModel) {
         self.model = model
@@ -117,6 +119,13 @@ public final class EmoteRenderer: @unchecked Sendable {
     /// Evaluates the model and returns its items back to front (root transform `root`),
     /// with the motion instances (whose `subtree` the caller clears when done: stencils
     /// and instances refer to each other).
+    /// Runs `body` with `sink` collecting shape layers.
+    func withShapeSink(_ sink: @escaping (EmoteModel.Layer, Node) -> Void, _ body: () -> Void) {
+        shapeSink = sink
+        defer { shapeSink = nil }
+        body()
+    }
+
     func items(variables: [String: Double], time: Double, root: Node) -> (items: [Item], instances: [Instance]) {
         guard let motion = model.objects[model.baseObject]?[model.baseMotion] else { return ([], []) }
         var instances: [Instance] = []
@@ -167,6 +176,7 @@ public final class EmoteRenderer: @unchecked Sendable {
             }
             node.opacity = parent.opacity * (state == nil ? 1 : content.opacity)
             node.z = parent.z + content.z
+            if state != nil, layer.type == 1, layer.shape != nil { shapeSink?(layer, node) }
 
             var own: [Item] = []
             if state != nil {

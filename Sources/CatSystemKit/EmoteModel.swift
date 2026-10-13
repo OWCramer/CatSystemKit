@@ -68,8 +68,14 @@ public final class EmoteModel {
         public let meshDivision: Int
         public let frames: [Frame]
         public let children: [Layer]
+        /// A shape layer's (type 1) geometry: 0 point, 1 circle, 2 rectangle, 3 quad - a 16-unit
+        /// square about the layer's position, scaled and turned with it. Hit areas
+        /// (`hit_head` ...) are these.
+        public let shape: Int?
 
-        init(label: String, type: Int, parameterize: Int?, maskLabels: [String], meshDivision: Int, frames: [Frame], children: [Layer]) {
+        init(label: String, type: Int, parameterize: Int?, maskLabels: [String], meshDivision: Int, frames: [Frame],
+             children: [Layer], shape: Int? = nil) {
+            self.shape = shape
             self.label = label
             self.type = type
             self.parameterize = parameterize
@@ -240,7 +246,8 @@ public final class EmoteModel {
         return Layer(label: value["label"]?.string ?? "", type: type, parameterize: value["parameterize"]?.int,
                      maskLabels: (value["stencilCompositeMaskLayerList"]?.list ?? []).compactMap(\.string),
                      meshDivision: value["meshDivision"]?.int ?? 16, frames: frames,
-                     children: (value["children"]?.list ?? []).map(layer))
+                     children: (value["children"]?.list ?? []).map(layer),
+                     shape: type == 1 ? value["shape"]?.int : nil)
     }
 
     /// A frame's content, reading only what its `mask` says is there (as M2's player does).
