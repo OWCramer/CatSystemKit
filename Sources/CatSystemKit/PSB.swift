@@ -88,20 +88,22 @@ public final class PSBFile {
     private var chunkData = 0
 
     /// Reads a `.psz` (`PSZ\0`, zlib length, inflated length, reserved, zlib stream) or a PSB.
-    public convenience init(psz: [UInt8], bodySeed: UInt32? = nil) throws {
+    public convenience init(psz: [UInt8], bodySeed: UInt32? = nil, candidateSeeds: [UInt32] = []) throws {
         if psz.count >= 16, psz[0] == 0x50, psz[1] == 0x53, psz[2] == 0x5A, psz[3] == 0 {
             let packed = Int(Self.u32(psz, 4)), size = Int(Self.u32(psz, 8))
             guard 16 + packed <= psz.count else { throw Failure.truncated("psz") }
-            try self.init(Zlib.inflate(psz[16..<(16 + packed)], size: size), bodySeed: bodySeed)
+            try self.init(Zlib.inflate(psz[16..<(16 + packed)], size: size), bodySeed: bodySeed, candidateSeeds: candidateSeeds)
         } else {
-            try self.init(psz, bodySeed: bodySeed)
+            try self.init(psz, bodySeed: bodySeed, candidateSeeds: candidateSeeds)
         }
     }
 
     /// `bodySeed`: the title's seed for a version 2 PSB whose name and string tables are
     /// encrypted (E-mote 3 models in KiriKiri games), when already known; nil finds it
     /// from the file (see `findBodySeed`).
-    public init(_ data: [UInt8], bodySeed: UInt32? = nil) throws {
+    /// `candidateSeeds`: seeds found before (other runs of the same games), tried before the
+    /// search: finding a seed from the file alone takes a fifth of a second.
+    public init(_ data: [UInt8], bodySeed: UInt32? = nil, candidateSeeds: [UInt32] = []) throws {
         guard data.count >= 0x38, data[0] == 0x50, data[1] == 0x53, data[2] == 0x42, data[3] == 0 else { throw Failure.notPSB }
         var bytes = data
         version = Int(bytes[4]) | Int(bytes[5]) << 8
@@ -120,6 +122,7 @@ public final class PSBFile {
             // started afresh there.
             let seed: UInt32
             if let bodySeed, Self.seedFits(bodySeed, bytes) { seed = bodySeed }
+            else if let known = candidateSeeds.first(where: { Self.seedFits($0, bytes) }) { seed = known }
             else if let found = Self.findBodySeed(bytes) { seed = found }
             else { throw Failure.truncated("encrypted tables (no seed found)") }
             let start = Int(Self.u32(bytes, 8)), end = Int(Self.u32(bytes, 24))
