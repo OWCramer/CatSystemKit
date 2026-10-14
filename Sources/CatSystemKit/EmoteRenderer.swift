@@ -226,7 +226,7 @@ public final class EmoteRenderer: @unchecked Sendable {
                     }
                 case 3:
                     if let object = content.src, let name = content.icon, let sub = model.objects[object]?[name] {
-                        evaluate(sub, named: name, time: time + content.timeOffset, parent: node, clips: clips,
+                        evaluate(sub, named: name, time: Self.playTime(time + content.timeOffset, of: sub), parent: node, clips: clips,
                                  variables: variables, instances: &instances, depth: depth + 1, into: &out)
                     }
                 default:
@@ -246,6 +246,16 @@ public final class EmoteRenderer: @unchecked Sendable {
         }
 
         for layer in motion.layers { visit(layer, parent: parent, clips: clips, into: &out) }
+    }
+
+    /// Where a motion is at `time` from its start: past its last frame it loops back to
+    /// `loopTime`, or holds just before its end keys (which end its layers) when it doesn't loop.
+    public static func playTime(_ time: Double, of motion: EmoteModel.Motion) -> Double {
+        guard motion.lastTime > 0, time > motion.lastTime else { return time }
+        if motion.loopTime >= 0, motion.lastTime > motion.loopTime {
+            return motion.loopTime + (time - motion.loopTime).truncatingRemainder(dividingBy: motion.lastTime - motion.loopTime)
+        }
+        return max(0, motion.lastTime - 0.001)
     }
 
     /// A frame list's content at `time`, or nil when nothing shows then.
