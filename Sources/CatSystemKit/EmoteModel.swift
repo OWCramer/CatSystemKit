@@ -113,9 +113,12 @@ public final class EmoteModel {
         /// (time, layer indices front to back).
         public let priority: [(time: Double, order: [Int])]
         public let lastTime: Double
+        /// Where the motion loops back to at `lastTime` (-1: it holds its last frame).
+        public let loopTime: Double
 
         init(parameters: [Parameter], defaultParameter: Int?, layers: [Layer], layerIndex: [String: Int],
-             priority: [(time: Double, order: [Int])], lastTime: Double) {
+             priority: [(time: Double, order: [Int])], lastTime: Double, loopTime: Double = -1) {
+            self.loopTime = loopTime
             self.parameters = parameters
             self.defaultParameter = defaultParameter
             self.layers = layers
@@ -181,6 +184,22 @@ public final class EmoteModel {
             }
             if let texture { textures.append(texture) }
             sources[name] = Source(texture: texture, textureIndex: texture == nil ? nil : textures.count - 1, icons: icons)
+            // A plain motion file's source (type 1) keeps each image on its own (`pixel`, raw
+            // or `RL` run-length): each becomes a source of its own, "<source>/<image>", which
+            // layers name as `src/<source>/<image>`.
+            if value["texture"] == nil {
+                for (iconName, icon) in (value["icon"]?.dictionary ?? [:]).sorted(by: { $0.key < $1.key }) {
+                    guard let w = icon["width"]?.int, let h = icon["height"]?.int, w > 0, h > 0,
+                          case .resource(let index)? = icon["pixel"], let stored = psb.resource(index) else { continue }
+                    let pixels = icon["compress"]?.string == "RL" ? Self.runLength(stored, count: w * h * 4) : Array(stored)
+                    guard pixels.count >= w * h * 4 else { continue }
+                    textures.append(Texture(width: w, height: h, pixels: Array(pixels.prefix(w * h * 4))))
+                    let one = Icon(left: 0, top: 0, width: w, height: h, originX: icon["originX"]?.number ?? 0,
+                                   originY: icon["originY"]?.number ?? 0)
+                    sources["\(name)/\(iconName)"] = Source(texture: textures.last, textureIndex: textures.count - 1,
+                                                             icons: [iconName: one])
+                }
+            }
         }
         self.sources = sources
         self.textures = textures
@@ -246,7 +265,8 @@ public final class EmoteModel {
         }
         return Motion(parameters: parameters, defaultParameter: value["parameterize"]?.int,
                       layers: (value["layer"]?.list ?? []).map(layer), layerIndex: layerIndex,
-                      priority: priority, lastTime: value["lastTime"]?.number ?? 0)
+                      priority: priority, lastTime: value["lastTime"]?.number ?? 0,
+                      loopTime: value["loopTime"]?.number ?? -1)
     }
 
     private static func layer(_ value: PSBFile.Value) -> Layer {
@@ -267,11 +287,50 @@ public final class EmoteModel {
     }
 
     /// A frame's content, reading only what its `mask` says is there (as M2's player does).
+    /// PSB's `RL` images: a byte n < 0x80 copies the next n + 1 pixels, n >= 0x80 repeats
+    /// the next pixel (n & 0x7F) + 3 times; pixels are 4 bytes.
+    static func runLength(_ input: some Collection<UInt8>, count: Int) -> [UInt8] {
+        let bytes = Array(input)
+        var out: [UInt8] = []
+        out.reserveCapacity(count)
+        var i = 0
+        while i < bytes.count, out.count < count {
+            let n = Int(bytes[i]); i += 1
+            if n & 0x80 != 0 {
+                guard i + 4 <= bytes.count else { break }
+                let pixel = bytes[i..<i + 4]; i += 4
+                for _ in 0..<((n & 0x7F) + 3) { out.append(contentsOf: pixel) }
+            } else {
+                let length = (n + 1) * 4
+                guard i + length <= bytes.count else { break }
+                out.append(contentsOf: bytes[i..<i + length]); i += length
+            }
+        }
+        return out
+    }
+
     private static func content(_ c: PSBFile.Value, layerType: Int) -> Content {
         var out = Content()
         let mask = c["mask"]?.int ?? 0
         out.src = c["src"]?.string
         out.icon = c["icon"]?.string
+        // Plain motion files name an image as "src/<source>/<image>" and another motion as
+        // "motion/<object>/<motion>", with no `icon`.
+        if out.icon == nil, let src = out.src {
+            if src.hasPrefix("src/") {
+                let rest = src.dropFirst(4)
+                if let slash = rest.lastIndex(of: "/") {
+                    out.src = String(rest)
+                    out.icon = String(rest[rest.index(after: slash)...])
+                }
+            } else if src.hasPrefix("motion/") {
+                let rest = src.dropFirst(7)
+                if let slash = rest.lastIndex(of: "/") {
+                    out.src = String(rest[..<slash])
+                    out.icon = String(rest[rest.index(after: slash)...])
+                }
+            }
+        }
         if mask & 0x1 != 0 { out.ox = c["ox"]?.number ?? 0; out.oy = c["oy"]?.number ?? 0 }
         if mask & 0x2 != 0, let coord = c["coord"]?.numbers {
             if coord.count > 0 { out.x = coord[0] }

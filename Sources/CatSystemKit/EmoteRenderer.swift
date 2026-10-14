@@ -21,6 +21,10 @@ public struct EmoteImage: Sendable {
 /// coverage of their mask layers.
 public final class EmoteRenderer: @unchecked Sendable {
     public let model: EmoteModel
+    /// The object and motion drawn, when not the model's base (a plain motion file's player
+    /// plays one of its motions by name).
+    public var object: String?
+    public var motion: String?
     /// Collects shape layers while a pose is evaluated (for `shapes`).
     private var shapeSink: ((EmoteModel.Layer, Node) -> Void)?
 
@@ -155,11 +159,12 @@ public final class EmoteRenderer: @unchecked Sendable {
     }
 
     func items(variables: [String: Double], time: Double, root: Node) -> (items: [Item], instances: [Instance]) {
-        guard let motion = model.objects[model.baseObject]?[model.baseMotion] else { return ([], []) }
+        let motionName = self.motion ?? model.baseMotion
+        guard let motion = model.objects[object ?? model.baseObject]?[motionName] else { return ([], []) }
         var instances: [Instance] = []
         var items: [Item] = []
         items.reserveCapacity(256)
-        evaluate(motion, named: model.baseMotion, time: time, parent: root, clips: [], variables: variables,
+        evaluate(motion, named: motionName, time: time, parent: root, clips: [], variables: variables,
                  instances: &instances, depth: 0, into: &items)
         return (items, instances)
     }
