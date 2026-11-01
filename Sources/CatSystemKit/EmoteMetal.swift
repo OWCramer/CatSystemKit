@@ -108,7 +108,7 @@ public final class EmoteGPU: @unchecked Sendable {
         guard let queue = device.makeCommandQueue(), let buffer = queue.makeCommandBuffer() else { return nil }
         var out: [MTLTexture] = []
         for t in model.textures {
-            guard t.width > 0, t.height > 0 else { return nil }
+            guard t.width > 0, t.height > 0, let size = Limits.rgbaBytes(t.width, t.height), t.pixels.count >= size else { return nil }
             let staging = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: t.width, height: t.height, mipmapped: false)
             staging.usage = .shaderRead
             staging.storageMode = .shared

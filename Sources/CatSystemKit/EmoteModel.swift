@@ -37,6 +37,15 @@ public final class EmoteModel {
     public struct Icon {
         public let left: Int, top: Int, width: Int, height: Int
         public let originX: Double, originY: Double
+
+        /// Largest coordinate or size an icon may have (a texture is at most 16384 wide).
+        static let maxExtent = 1 << 16
+
+        /// Whether the box is one a texture could hold: nothing negative, nothing so large that
+        /// adding it up overflows. Icons read from a model that aren't are dropped.
+        var isPlausible: Bool {
+            [left, top, width, height].allSatisfy { (0...Self.maxExtent).contains($0) }
+        }
     }
 
     public struct Texture {
@@ -176,13 +185,14 @@ public final class EmoteModel {
         for (name, value) in (root["source"]?.dictionary ?? [:]).sorted(by: { $0.key < $1.key }) {
             var icons: [String: Icon] = [:]
             for (iconName, icon) in value["icon"]?.dictionary ?? [:] {
-                icons[iconName] = Icon(left: icon["left"]?.int ?? 0, top: icon["top"]?.int ?? 0,
-                                       width: icon["width"]?.int ?? 0, height: icon["height"]?.int ?? 0,
-                                       originX: icon["originX"]?.number ?? 0, originY: icon["originY"]?.number ?? 0)
+                let box = Icon(left: icon["left"]?.int ?? 0, top: icon["top"]?.int ?? 0,
+                               width: icon["width"]?.int ?? 0, height: icon["height"]?.int ?? 0,
+                               originX: icon["originX"]?.number ?? 0, originY: icon["originY"]?.number ?? 0)
+                if box.isPlausible { icons[iconName] = box }
             }
             var texture: Texture?
-            if let t = value["texture"], let w = t["width"]?.int, let h = t["height"]?.int,
-               case .resource(let index)? = t["pixel"], let pixels = psb.resource(index), pixels.count >= w * h * 4 {
+            if let t = value["texture"], let w = t["width"]?.int, let h = t["height"]?.int, let size = Limits.rgbaBytes(w, h),
+               case .resource(let index)? = t["pixel"], let pixels = psb.resource(index), pixels.count >= size {
                 let used = min(h, icons.values.map { $0.top + $0.height }.max() ?? h)
                 texture = Texture(width: w, height: used, pixels: Array(pixels.prefix(w * used * 4)))
             }
@@ -194,10 +204,11 @@ public final class EmoteModel {
             if value["texture"] == nil {
                 for (iconName, icon) in (value["icon"]?.dictionary ?? [:]).sorted(by: { $0.key < $1.key }) {
                     guard let w = icon["width"]?.int, let h = icon["height"]?.int, w > 0, h > 0,
+                          w <= Icon.maxExtent, h <= Icon.maxExtent, let size = Limits.rgbaBytes(w, h),
                           case .resource(let index)? = icon["pixel"], let stored = psb.resource(index) else { continue }
-                    let pixels = icon["compress"]?.string == "RL" ? Self.runLength(stored, count: w * h * 4) : Array(stored)
-                    guard pixels.count >= w * h * 4 else { continue }
-                    textures.append(Texture(width: w, height: h, pixels: Array(pixels.prefix(w * h * 4))))
+                    let pixels = icon["compress"]?.string == "RL" ? Self.runLength(stored, count: size) : Array(stored)
+                    guard pixels.count >= size else { continue }
+                    textures.append(Texture(width: w, height: h, pixels: Array(pixels.prefix(size))))
                     let one = Icon(left: 0, top: 0, width: w, height: h, originX: icon["originX"]?.number ?? 0,
                                    originY: icon["originY"]?.number ?? 0)
                     sources["\(name)/\(iconName)"] = Source(texture: textures.last, textureIndex: textures.count - 1,
@@ -265,7 +276,7 @@ public final class EmoteModel {
         for (k, v) in value["layerIndexMap"]?.dictionary ?? [:] { if let i = v.int { layerIndex[k] = i } }
         let priority = (value["priority"]?.list ?? []).compactMap { f -> (time: Double, order: [Int])? in
             guard let order = f["content"]?.numbers else { return nil }
-            return (f["time"]?.number ?? 0, order.map { Int($0) })
+            return (f["time"]?.number ?? 0, order.map { Int(saturating: $0) })
         }
         return Motion(parameters: parameters, defaultParameter: value["parameterize"]?.int,
                       layers: (value["layer"]?.list ?? []).map(layer), layerIndex: layerIndex,
@@ -370,7 +381,7 @@ public final class EmoteModel {
     /// `fade_c` and hides the others).
     public func applySelectors(_ v: inout [String: Double]) {
         for s in selectors {
-            let chosen = Int(v[s.label] ?? 0)
+            let chosen = Int(saturating: v[s.label] ?? 0)
             for (i, option) in s.options.enumerated() { v[option.label] = i == chosen ? option.on : option.off }
         }
     }

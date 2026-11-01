@@ -303,7 +303,8 @@ public final class EmoteRenderer: @unchecked Sendable {
     static func blankBox(_ text: String) -> EmoteModel.Icon? {
         let parts = text.split(separator: ":").compactMap { Double($0) }
         guard parts.count == 4 else { return nil }
-        return EmoteModel.Icon(left: 0, top: 0, width: Int(parts[0]), height: Int(parts[1]), originX: parts[2], originY: parts[3])
+        return EmoteModel.Icon(left: 0, top: 0, width: Int(saturating: parts[0]), height: Int(saturating: parts[1]),
+                               originX: parts[2], originY: parts[3])
     }
 
     /// The frame's transform: flip, slant, zoom, then rotate (the models' `transformOrder`
@@ -386,12 +387,15 @@ public final class EmoteRenderer: @unchecked Sendable {
                 minY = min(minY, Double(pts[k + 1])); maxY = max(maxY, Double(pts[k + 1]))
             }
         }
-        guard minX.isFinite, maxX - minX < 16384, maxY - minY < 16384 else {
+        guard minX.isFinite, minY.isFinite, abs(minX) < 1e7, abs(minY) < 1e7, maxX - minX < 16384, maxY - minY < 16384 else {
             return EmoteImage(width: 0, height: 0, originX: 0, originY: 0, rgba: [])
         }
         let x0 = Int(minX.rounded(.down)) - 1, y0 = Int(minY.rounded(.down)) - 1
         let width = Int(maxX.rounded(.up)) - x0 + 2, height = Int(maxY.rounded(.up)) - y0 + 2
-        var canvas = [UInt8](repeating: 0, count: width * height * 4)
+        guard let canvasSize = Limits.rgbaBytes(width, height) else {
+            return EmoteImage(width: 0, height: 0, originX: 0, originY: 0, rgba: [])
+        }
+        var canvas = [UInt8](repeating: 0, count: canvasSize)
 
         func maskBuffer(_ stencil: Stencil) -> [UInt8] {
             if let m = stencil.mask { return m }
@@ -433,13 +437,17 @@ public final class EmoteRenderer: @unchecked Sendable {
         let tw = texture.width
         let left = Float(icon.left), top = Float(icon.top)
         let iw = Float(icon.width), ih = Float(icon.height)
+        // The texture is read unchecked below: the icon's box must lie inside it, and the
+        // pixels must cover the texture.
+        guard icon.left >= 0, icon.top >= 0, icon.width > 0, icon.height > 0,
+              icon.width <= tw - icon.left, icon.height <= texture.height - icon.top,
+              let size = Limits.rgbaBytes(tw, texture.height), texture.pixels.count >= size else { return }
         let maxU = icon.left + icon.width - 1, maxV = icon.top + icon.height - 1
-        guard icon.width > 0, icon.height > 0, maxU < texture.width, maxV < texture.height else { return }
         let alphaScale = Float(opacity)
         texture.pixels.withUnsafeBufferPointer { tex in
             func sample(_ u: Float, _ v: Float) -> (Float, Float, Float, Float) {
                 let fu = min(max(u - 0.5, Float(icon.left)), Float(maxU)), fv = min(max(v - 0.5, Float(icon.top)), Float(maxV))
-                let iu = Int(fu), iv = Int(fv)
+                let iu = Int(saturating: fu), iv = Int(saturating: fv)
                 let iu1 = min(iu + 1, maxU), iv1 = min(iv + 1, maxV)
                 let du = fu - Float(iu), dv = fv - Float(iv)
                 var r: Float = 0, g: Float = 0, b: Float = 0, a: Float = 0
@@ -457,8 +465,10 @@ public final class EmoteRenderer: @unchecked Sendable {
                 // (x, y, u, v); x, y in output pixels relative to (x0, y0).
                 let area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p2.0 - p0.0) * (p1.1 - p0.1)
                 guard abs(area) > 1e-6 else { return }
-                let minX = max(0, Int(min(p0.0, p1.0, p2.0).rounded(.down))), maxX = min(width - 1, Int(max(p0.0, p1.0, p2.0).rounded(.up)))
-                let minY = max(0, Int(min(p0.1, p1.1, p2.1).rounded(.down))), maxY = min(height - 1, Int(max(p0.1, p1.1, p2.1).rounded(.up)))
+                let minX = max(0, Int(saturating: min(p0.0, p1.0, p2.0).rounded(.down)))
+                let maxX = min(width - 1, Int(saturating: max(p0.0, p1.0, p2.0).rounded(.up)))
+                let minY = max(0, Int(saturating: min(p0.1, p1.1, p2.1).rounded(.down)))
+                let maxY = min(height - 1, Int(saturating: max(p0.1, p1.1, p2.1).rounded(.up)))
                 guard minX <= maxX, minY <= maxY else { return }
                 let inv = 1 / area
                 for y in minY...maxY {
