@@ -46,10 +46,15 @@ public struct SceneTranslation: Sendable {
             defer { at += length }
             return String(decoding: bytes[at..<at + length], as: UTF8.self)
         }
+        // Each language and message takes at least a byte: counts past the bytes left are lies.
         let languageCount = try number()
+        guard languageCount <= bytes.count - at else { throw Failure(description: "CSTL language count \(languageCount)") }
         var languages: [String] = []
         for _ in 0..<languageCount { languages.append(try string()) }
         let count = try number()
+        guard count == 0 || (!languages.isEmpty && count <= bytes.count - at) else {
+            throw Failure(description: "CSTL message count \(count)")
+        }
         var messages: [[String: Message]] = []
         messages.reserveCapacity(count)
         for _ in 0..<count {

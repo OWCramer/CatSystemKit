@@ -64,10 +64,17 @@ public struct HGImage: Sendable {
         guard Self.isHG3(bytes), bytes.count >= 0x14 else { throw Failure.notHG3 }
         var frames: [Frame] = []
         var frameStart = Int(bytes.le32(4))
+        // Frames (and their sections) can point at the same pixels, so a small file could
+        // otherwise ask for many large frames: their count and their pixels together are held.
+        var budget = Limits.pictureTotal
         while frameStart + 8 <= bytes.count {
+            guard frames.count < Limits.frames else { throw Failure.malformed("more than \(Limits.frames) frames") }
             let next = Int(bytes.le32(frameStart))
             let id = Int(bytes.le32(frameStart + 4))
-            frames.append(try Self.frame(bytes, at: frameStart, id: id, pixels: pixels))
+            let frame = try Self.frame(bytes, at: frameStart, id: id, pixels: pixels)
+            budget -= frame.rgba.count
+            guard budget >= 0 else { throw Failure.malformed("frames larger than \(Limits.pictureTotal) bytes") }
+            frames.append(frame)
             if next == 0 { break }
             frameStart += next
         }
@@ -93,7 +100,7 @@ public struct HGImage: Sendable {
         let p = info.payload.lowerBound
         let width = Int(bytes.le32(p)), height = Int(bytes.le32(p + 4)), bpp = Int(bytes.le32(p + 8))
         func signed(_ at: Int) -> Int { Int(Int32(bitPattern: bytes.le32(at))) }
-        guard width > 0, height > 0, width <= 16384, height <= 16384 else {
+        guard width > 0, height > 0, width <= 16384, height <= 16384, let rgbaSize = Limits.rgbaBytes(width, height) else {
             throw Failure.malformed("frame \(id) size \(width)×\(height)")
         }
         var rgba: [UInt8] = []
@@ -107,13 +114,13 @@ public struct HGImage: Sendable {
                     throw Failure.malformed("frame \(id): no image section in \(sections.map(\.name))")
                 }
                 guard bpp == 32 || bpp == 24 else { throw Failure.malformed("frame \(id): \(bpp) bits per pixel") }
-                rgba = [UInt8](repeating: 0, count: width * height * 4)
+                rgba = [UInt8](repeating: 0, count: rgbaSize)
                 do {
                     for part in parts { try decodePart(bytes, part.payload, width: width, height: height, bpp: bpp, into: &rgba) }
                 } catch {
                     // One odd frame (sys_meswnd's 8×8 frame 31 has a run total for 32 rows)
                     // shouldn't cost the picture its other frames: it stays transparent.
-                    rgba = [UInt8](repeating: 0, count: width * height * 4)
+                    rgba = [UInt8](repeating: 0, count: rgbaSize)
                 }
             }
         }

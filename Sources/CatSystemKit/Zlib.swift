@@ -11,8 +11,13 @@ enum Zlib {
     }
 
     /// Inflates a zlib stream (2-byte header, deflate body) whose inflated size is known.
+    /// The size comes from the file, so it is held to what the stream could inflate to and
+    /// to `Limits.allocation` before the buffer is made.
     static func inflate(_ input: ArraySlice<UInt8>, size: Int) throws -> [UInt8] {
         guard input.count > 2 else { throw Failure(description: "zlib stream too short") }
+        guard size >= 0, size <= Limits.allocation, size / Limits.deflateRatio <= input.count else {
+            throw Failure(description: "zlib inflated size \(size) for \(input.count) bytes")
+        }
         if size == 0 { return [] }
         let body = input.dropFirst(2)
         var output = [UInt8](repeating: 0, count: size)
