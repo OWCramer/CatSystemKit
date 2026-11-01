@@ -67,7 +67,7 @@ public final class PSBFile {
             }
         }
 
-        public var int: Int? { number.map { Int($0) } }
+        public var int: Int? { number.map { Int(saturating: $0) } }
 
         /// A list of numbers (`coord`, `bp`), however it was stored.
         public var numbers: [Double]? {
@@ -90,6 +90,12 @@ public final class PSBFile {
     private var chunkOffsets: [Int] = []
     private var chunkLengths: [Int] = []
     private var chunkData = 0
+    /// Values left to read: lists and dictionaries may share children (offsets are
+    /// relative, so many entries can name one value), so the tree read out of a file is held
+    /// to a multiple of the file's size rather than growing with every share.
+    private var valueBudget = 0
+    /// How deep lists and dictionaries may nest.
+    static let maxDepth = 128
 
     /// Reads a `.psz` (`PSZ\0`, zlib length, inflated length, reserved, zlib stream) or a PSB.
     public convenience init(psz: [UInt8], bodySeed: UInt32? = nil, candidateSeeds: [UInt32] = []) throws {
@@ -167,15 +173,16 @@ public final class PSBFile {
         chunkOffsets = try integers(&p)
         p = offsetChunkLengths
         chunkLengths = try integers(&p)
-        root = try value(at: offsetRoot)
+        valueBudget = 4 * bytes.count + (1 << 20)
+        root = try value(at: offsetRoot, depth: 0)
     }
 
     /// A resource's bytes (a texture's pixels).
     public func resource(_ index: Int) -> ArraySlice<UInt8>? {
-        guard index < chunkOffsets.count, index < chunkLengths.count else { return nil }
-        let start = chunkData + chunkOffsets[index], end = start + chunkLengths[index]
-        guard end <= bytes.count else { return nil }
-        return bytes[start..<end]
+        guard index >= 0, index < chunkOffsets.count, index < chunkLengths.count else { return nil }
+        let (start, overflow) = chunkData.addingReportingOverflow(chunkOffsets[index])
+        guard !overflow, Limits.fits(start, chunkLengths[index], in: bytes.count) else { return nil }
+        return bytes[start..<start + chunkLengths[index]]
     }
 
     // MARK: Reading
@@ -250,6 +257,12 @@ public final class PSBFile {
         return nil
     }
 
+    /// `base + offset`, or -1 (which no value is at) when that overflows.
+    private static func offset(_ base: Int, _ offset: Int) -> Int {
+        let (sum, overflow) = base.addingReportingOverflow(offset)
+        return overflow ? -1 : sum
+    }
+
     private func uint(_ p: Int, _ n: Int) -> Int {
         var v = 0
         for i in 0..<n where p + i < bytes.count { v |= Int(bytes[p + i]) << (8 * i) }
@@ -265,23 +278,34 @@ public final class PSBFile {
         guard widthAt < bytes.count else { throw Failure.truncated("array width") }
         let width = Int(bytes[widthAt]) - 0xC
         let start = widthAt + 1
-        guard (1...8).contains(width), start + count * width <= bytes.count else { throw Failure.truncated("array body") }
+        // An eight-byte count can be negative or overflow `count * width`: held to the bytes left.
+        guard (1...8).contains(width), count >= 0, count <= (bytes.count - start) / width else {
+            throw Failure.truncated("array body")
+        }
         var out = [Int](repeating: 0, count: count)
-        for i in 0..<count { out[i] = uint(start + i * width, width) }
+        for i in 0..<count {
+            // Array entries are unsigned: an eight-byte one past Int.max is not a real offset.
+            out[i] = uint(start + i * width, width)
+            guard out[i] >= 0 else { throw Failure.truncated("array entry") }
+        }
         p = start + count * width
         return out
     }
 
     private func string(_ index: Int) -> String {
-        guard index < stringOffsets.count else { return "" }
-        let start = stringData + stringOffsets[index]
+        guard index >= 0, index < stringOffsets.count else { return "" }
+        let (start, overflow) = stringData.addingReportingOverflow(stringOffsets[index])
+        guard !overflow, start < bytes.count else { return "" }
         var end = start
         while end < bytes.count, bytes[end] != 0 { end += 1 }
         return String(decoding: bytes[start..<end], as: UTF8.self)
     }
 
-    private func value(at p: Int) throws -> Value {
-        guard p < bytes.count else { throw Failure.truncated("value") }
+    private func value(at p: Int, depth: Int) throws -> Value {
+        guard p >= 0, p < bytes.count else { throw Failure.truncated("value") }
+        guard depth < Self.maxDepth else { throw Failure.truncated("values nested past \(Self.maxDepth)") }
+        valueBudget -= 1
+        guard valueBudget >= 0 else { throw Failure.truncated("value tree larger than the file allows") }
         let type = Int(bytes[p])
         switch type {
         case 1: return .null
@@ -295,7 +319,10 @@ public final class PSBFile {
             return .int(v)
         case 0xD...0x14:
             var q = p
-            return .integers(try integers(&q))
+            let a = try integers(&q)
+            valueBudget -= a.count
+            guard valueBudget >= 0 else { throw Failure.truncated("value tree larger than the file allows") }
+            return .integers(a)
         case 0x15...0x18: return .string(string(uint(p + 1, type - 0x14)))
         case 0x19...0x1C: return .resource(uint(p + 1, type - 0x18))
         case 0x1D: return .double(0)
@@ -307,14 +334,16 @@ public final class PSBFile {
         case 0x20:
             var q = p + 1
             let offsets = try integers(&q)
-            return .list(try offsets.map { try value(at: q + $0) })
+            return .list(try offsets.map { try value(at: Self.offset(q, $0), depth: depth + 1) })
         case 0x21:
             var q = p + 1
             let keys = try integers(&q)
             let offsets = try integers(&q)
             var d: [String: Value] = [:]
             d.reserveCapacity(keys.count)
-            for (k, o) in zip(keys, offsets) where k < names.count { d[names[k]] = try value(at: q + o) }
+            for (k, o) in zip(keys, offsets) where k < names.count {
+                d[names[k]] = try value(at: Self.offset(q, o), depth: depth + 1)
+            }
             return .dictionary(d)
         case 0x22...0x25: return .extraResource(uint(p + 1, type - 0x21))
         default:
