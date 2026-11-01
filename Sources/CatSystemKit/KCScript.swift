@@ -45,6 +45,9 @@ public struct KCScript: Sendable {
         dataSize = Int(bytes.le32(32))
         stackSize = Int(bytes.le32(36))
         guard headerSize == 0x34, headerSize < bytes.count else { throw Failure(description: "kcScript header size \(headerSize)") }
+        guard dataSize <= Limits.allocation, stackSize <= Limits.allocation else {
+            throw Failure(description: "kcScript data \(dataSize) / stack \(stackSize) bytes")
+        }
         body = try Zlib.inflate(bytes[headerSize...], size: codeSize + tableSize)
         var data = [UInt8](repeating: 0, count: dataSize)
         var strings: [Int: String] = [:]

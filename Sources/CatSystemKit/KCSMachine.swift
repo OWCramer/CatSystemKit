@@ -42,7 +42,7 @@ public final class KCSMachine {
     public init(script: KCScript, sharedSize: Int = 0x10_0000, stackSize: Int = 0x10_0000) {
         self.script = script
         data = script.data
-        stack = [UInt8](repeating: 0, count: max(stackSize, script.stackSize))
+        stack = [UInt8](repeating: 0, count: max(stackSize, min(script.stackSize, Limits.allocation)))
         shared = [UInt8](repeating: 0, count: sharedSize)
     }
 
@@ -63,7 +63,7 @@ public final class KCSMachine {
     }
 
     /// The frame pointer as an address (`lea 0`), for natives that read the caller's locals.
-    public var frameAddress: UInt32 { Self.stackBase + UInt32(fp) }
+    public var frameAddress: UInt32 { Self.stackBase &+ UInt32(truncatingIfNeeded: fp) }
 
     /// Runs until `halt` or `limit` instructions; throws on a malformed instruction or a bad address.
     public func run(limit: Int = 10_000_000) throws {
@@ -127,7 +127,7 @@ public final class KCSMachine {
         var a = address
         while bytes.count < 4096, let b = try? load(a, width: 1), b & 0xFF != 0 {
             bytes.append(UInt8(b & 0xFF))
-            a += 1
+            a &+= 1
         }
         return String(data: Data(bytes), encoding: cp932) ?? String(decoding: bytes, as: UTF8.self)
     }
@@ -135,7 +135,7 @@ public final class KCSMachine {
     /// Writes a NUL-terminated CP932 string (for natives that fill a buffer).
     public func writeString(_ text: String, at address: UInt32) {
         let bytes = (text.data(using: cp932).map { [UInt8]($0) } ?? Array(text.utf8)) + [0]
-        for (i, b) in bytes.enumerated() { try? store(address + UInt32(i), UInt32(b), width: 1) }
+        for (i, b) in bytes.enumerated() { try? store(address &+ UInt32(truncatingIfNeeded: i), UInt32(b), width: 1) }
     }
 
     // MARK: Stack
@@ -350,7 +350,8 @@ public final class KCSMachine {
         case .pop:
             _ = try pop()
         case .addressOfLocal:
-            try push(Self.stackBase + UInt32(fp) + (try read(ops[0])))
+            // Address arithmetic wraps, as on the 32-bit machine (a wild address then fails its load).
+            try push(Self.stackBase &+ UInt32(truncatingIfNeeded: fp) &+ (try read(ops[0])))
         case .addressAdd:
             let a = try read(ops[0]), b = try read(ops[1])
             try push(a &+ b)

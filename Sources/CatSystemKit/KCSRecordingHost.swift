@@ -127,7 +127,7 @@ public final class KCSRecordingHost: KCSHost {
             if j < chars.count, chars[j] == "[", let close = chars[j...].firstIndex(of: "]") {
                 let reference = String(chars[(j + 1)..<close])
                 if let n = UInt32(reference.dropFirst()) {
-                    address = reference.hasPrefix("L") ? m.frameAddress + n : n
+                    address = reference.hasPrefix("L") ? m.frameAddress &+ n : n
                 }
                 j = close + 1
             }
