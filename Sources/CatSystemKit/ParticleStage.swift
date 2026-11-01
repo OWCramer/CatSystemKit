@@ -77,7 +77,7 @@ public final class ParticleStage {
             let n = args.dropFirst(3).map { Double($0) }
             // kind texture count z bank [1] x y [side] size …
             func at(_ i: Int) -> Double? { i < n.count ? n[i] : nil }
-            let bank = at(2).map { Int($0) }
+            let bank = at(2).map { Int(saturating: $0) }
             var i = 3
             if kind == .note { i += 1 } // an extra flag before the place
             guard let x = at(i), let y = at(i + 1) else { return }
@@ -85,7 +85,7 @@ public final class ParticleStage {
             var side = 1.0
             if kind != .sweat, kind != .angry { side = (at(i) ?? 1) == 0 ? -1 : 1; i += 1 }
             let size = max(0.1, (at(i) ?? 100) / 100)
-            emitters[slot] = Emitter(kind: kind, texture: args[2], count: max(1, Int(at(0) ?? 1)), bank: bank,
+            emitters[slot] = Emitter(kind: kind, texture: args[2], count: max(1, Int(saturating: at(0) ?? 1)), bank: bank,
                                      x: x, y: y, side: side, size: size, start: frame,
                                      anchor: bank.flatMap(place), fade: nil)
         }

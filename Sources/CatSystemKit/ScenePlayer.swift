@@ -304,14 +304,16 @@ public final class ScenePlayer {
         pendingVoice = nil
         finished = false
         awaitingInput = snapshot.beforeInput ?? false
-        for position in snapshot.stack {
+        // A save is a file: its stack and positions are held to what the player could make.
+        for position in snapshot.stack.prefix(Self.maxCallDepth) {
             guard let bytes = try files(position.scene + ".cst") else {
                 throw CatSystemGame.Failure.notCatSystem(URL(fileURLWithPath: position.scene + ".cst"))
             }
             let scene = try CatScene(bytes)
             let translation = try files(position.scene + ".cstl").flatMap { try? SceneTranslation($0) }
             frames.append(Frame(name: position.scene, scene: scene, translation: translation,
-                                line: min(position.line, scene.lines.count), messageIndex: position.messageIndex))
+                                line: min(max(0, position.line), scene.lines.count),
+                                messageIndex: max(0, position.messageIndex)))
         }
         planes = snapshot.planes.mapValues(Self.migrated)
         if let saved = snapshot.cast {
@@ -340,6 +342,10 @@ public final class ScenePlayer {
         }
         return p
     }
+
+    /// How deep `call`s may nest (a scene that calls itself would otherwise load itself
+    /// without end).
+    static let maxCallDepth = 64
 
     /// The scene and line the player is at.
     public var position: (scene: String, line: Int)? { frames.last.map { ($0.name, $0.line) } }
@@ -478,6 +484,11 @@ public final class ScenePlayer {
             return
         case "call":
             pending.append(.command(line))
+            guard frames.count < Self.maxCallDepth else {
+                finished = true
+                pending.append(.end("calls nested past \(Self.maxCallDepth)"))
+                return
+            }
             if let name = args.first { try enter(name) }
             return
         case "title":
@@ -520,8 +531,8 @@ public final class ScenePlayer {
         let exVar = args.count > 6 ? Int(args[6]) : nil
         guard let c = cast[bank], c.model != nil else { return }
         let found = emote?.attribute(c, number: number)
-        variables[xVar] = Int((found?.x ?? Double(c.x ?? 640)).rounded())
-        variables[yVar] = Int((found?.y ?? Double((c.y ?? 360) - 170)).rounded())
+        variables[xVar] = Int(saturating: (found?.x ?? Double(c.x ?? 640)).rounded())
+        variables[yVar] = Int(saturating: (found?.y ?? Double((c.y ?? 360) - 170)).rounded())
         if let exVar { variables[exVar] = found?.extra ?? 3 }
     }
 
@@ -872,7 +883,7 @@ public final class ScenePlayer {
         let m = Double(c.scaleX) / 100
         let originX = Double(c.x ?? 640) + pose.positionX + Double(width) / 2 + pose.scaleOffsetX * (1 - m)
         let originY = Double(c.y ?? 360) + pose.positionY + Double(height) / 2 + pose.scaleOffsetY * (1 - m)
-        return (Int(originX.rounded()) - image.originX, Int(originY.rounded()) - image.originY)
+        return (Int(saturating: originX.rounded()) - image.originX, Int(saturating: originY.rounded()) - image.originY)
     }
 
     /// The screen as straight RGBA (`width`×`height`): planes and characters by priority
