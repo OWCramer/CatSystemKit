@@ -29,15 +29,29 @@ struct FESExpression {
     private let chars: [Character]
     private var at = 0
     private unowned let context: FESContext
+    /// Nesting so far (parentheses, unary operators, macros within macros): a macro that
+    /// names itself, or a long run of `(`, stops at `maxDepth` and reads as 0.
+    private var depth: Int
+    private static let maxDepth = 200
+    /// Macro expansions left for the whole expression (a macro naming itself twice would
+    /// otherwise double the work at every level).
+    private let macrosLeft: Counter
+    private final class Counter { var value = 4096 }
 
     static func evaluate(_ text: String, _ context: FESContext) -> Int {
-        var parser = FESExpression(chars: Array(text), context: context)
+        evaluate(text, context, depth: 0, macrosLeft: Counter())
+    }
+
+    private static func evaluate(_ text: String, _ context: FESContext, depth: Int, macrosLeft: Counter) -> Int {
+        var parser = FESExpression(chars: Array(text), context: context, depth: depth, macrosLeft: macrosLeft)
         return parser.or()
     }
 
-    private init(chars: [Character], context: FESContext) {
+    private init(chars: [Character], context: FESContext, depth: Int, macrosLeft: Counter) {
         self.chars = chars
         self.context = context
+        self.depth = depth
+        self.macrosLeft = macrosLeft
     }
 
     private mutating func skip() { while at < chars.count, chars[at] == " " { at += 1 } }
@@ -53,6 +67,9 @@ struct FESExpression {
     }
 
     private mutating func or() -> Int {
+        guard depth < Self.maxDepth else { at = chars.count; return 0 }
+        depth += 1
+        defer { depth -= 1 }
         var v = and()
         while take("||") { let r = and(); v = (v != 0 || r != 0) ? 1 : 0 }
         return v
@@ -117,13 +134,16 @@ struct FESExpression {
         var v = unary()
         while true {
             if take("*") { v &*= unary() }
-            else if take("/") { let r = unary(); v = r == 0 ? 0 : v / r }
-            else if take("%") { let r = unary(); v = r == 0 ? 0 : v % r }
+            else if take("/") { let r = unary(); v = r == 0 ? 0 : v.dividedReportingOverflow(by: r).partialValue }
+            else if take("%") { let r = unary(); v = r == 0 ? 0 : v.remainderReportingOverflow(dividingBy: r).partialValue }
             else { return v }
         }
     }
 
     private mutating func unary() -> Int {
+        guard depth < Self.maxDepth else { at = chars.count; return 0 }
+        depth += 1
+        defer { depth -= 1 }
         if take("-") { return 0 &- unary() }
         if take("!") { return unary() == 0 ? 1 : 0 }
         return primary()
@@ -163,7 +183,11 @@ struct FESExpression {
             at += 1
         }
         if let v = context.system(word) { return v }
-        if let m = context.macro(word) { return FESExpression.evaluate(m, context) }
+        if let m = context.macro(word) {
+            guard macrosLeft.value > 0 else { return 0 }
+            macrosLeft.value -= 1
+            return FESExpression.evaluate(m, context, depth: depth + 1, macrosLeft: macrosLeft)
+        }
         var index: Int?
         if at < chars.count, chars[at] == "[" {
             at += 1

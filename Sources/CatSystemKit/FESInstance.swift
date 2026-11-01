@@ -18,6 +18,8 @@ final class FESObject {
     var file: String?
     var ids: [Int] = []
     var idIndex = 0
+    /// The most entries an ID table may have (`ID.k`, `settbl k`).
+    static let maxIDs = 4096
     var x = 0, y = 0
     var offsetX = 0, offsetY = 0
     var width = 0, height = 0
@@ -74,7 +76,15 @@ final class FESObject {
 
     var currentID: Int? {
         if ids.isEmpty { return idIndex == 0 ? nil : idIndex }
-        return idIndex < ids.count ? ids[idIndex] : ids.last
+        return idIndex < ids.count ? ids[max(0, idIndex)] : ids.last
+    }
+
+    /// Sets entry `k` of the ID table, growing it with zeros; an index outside the table's
+    /// limit is ignored.
+    func setID(_ k: Int, _ id: Int) {
+        guard k >= 0, k < Self.maxIDs else { return }
+        while ids.count <= k { ids.append(0) }
+        ids[k] = id
     }
 
     /// Letters of the text shown at a frame (all of it unless it is being revealed).
@@ -101,15 +111,15 @@ final class FESObject {
 
     private func finish(_ a: (frames: Int, elapsed: Int, from: Double, to: Double, dx: Double, dy: Double, x: Int, y: Int)) {
         let s = sin(a.to * .pi / 180) - sin(a.from * .pi / 180)
-        x = a.x + Int((a.dx * s).rounded())
-        y = a.y + Int((a.dy * s).rounded())
+        x = a.x &+ Int(saturating: (a.dx * s).rounded())
+        y = a.y &+ Int(saturating: (a.dy * s).rounded())
         arc = nil
     }
 
     func advanceMotion() {
         if var f = fade {
             f.elapsed += 1
-            alpha = f.from + (f.to - f.from) * f.elapsed / f.frames
+            alpha = f.from &+ (f.to &- f.from) &* f.elapsed / f.frames
             fade = f.elapsed >= f.frames ? nil : f
         }
         if var a = arc {
@@ -119,8 +129,8 @@ final class FESObject {
             } else {
                 let angle = a.from + (a.to - a.from) * Double(a.elapsed) / Double(a.frames)
                 let s = sin(angle * .pi / 180) - sin(a.from * .pi / 180)
-                x = a.x + Int((a.dx * s).rounded())
-                y = a.y + Int((a.dy * s).rounded())
+                x = a.x &+ Int(saturating: (a.dx * s).rounded())
+                y = a.y &+ Int(saturating: (a.dy * s).rounded())
                 arc = a
             }
         }
@@ -281,10 +291,7 @@ final class FESInstance: FESContext {
             case "COLOR": o.color = UInt32(value.replacingOccurrences(of: "0x", with: ""), radix: 16)
             case "IDN": if let n = Int(value) { o.idIndex = max(0, n) }
             default:
-                if column.hasPrefix("ID."), let k = Int(column.dropFirst(3)) {
-                    while o.ids.count <= k { o.ids.append(0) }
-                    o.ids[k] = Int(value) ?? 0
-                }
+                if column.hasPrefix("ID."), let k = Int(column.dropFirst(3)) { o.setID(k, Int(value) ?? 0) }
             }
         }
     }
@@ -808,11 +815,7 @@ final class FESInstance: FESContext {
             if o.type == "SLIDER" || o.type == "SCROLL2" { break }
             o.idIndex = params.first.map(value) ?? 0
         case "settbl":
-            if params.count >= 2 {
-                let k = p(0)
-                while o.ids.count <= k { o.ids.append(0) }
-                o.ids[k] = p(1)
-            }
+            if params.count >= 2 { o.setID(p(0), p(1)) }
         case "fade", "fade2":
             o.startFade(frames: params.isEmpty ? 30 : p(0), from: params.count > 1 ? p(1) : 0, to: params.count > 2 ? p(2) : 255)
         case "arc":
@@ -1086,7 +1089,7 @@ final class FESInstance: FESContext {
             chars = chars.dropFirst()
             let v = values.popFirst() ?? 0
             if spec.hasPrefix("0"), let width = Int(spec) {
-                out += String(format: "%0\(width)d", v)
+                out += String(format: "%0\(min(width, 64))d", v)
             } else {
                 out += String(v)
             }
