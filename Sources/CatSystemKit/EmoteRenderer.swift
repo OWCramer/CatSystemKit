@@ -74,6 +74,8 @@ public final class EmoteRenderer: @unchecked Sendable {
         /// Depth: the sum of `coord`'s z down the tree; items draw from low to high.
         var z = 0.0
         let bent: Bool
+        var angle = 0.0, scaleX = 1.0, scaleY = 1.0, slantX = 0.0, slantY = 0.0
+        var flipX = false, flipY = false
 
         init(parent: Node?, bends: Bool) {
             self.parent = parent
@@ -106,9 +108,27 @@ public final class EmoteRenderer: @unchecked Sendable {
         let labels: [String]
         let instance: Instance
         var mask: [UInt8]?
+        let rect: (minX: Double, minY: Double, maxX: Double, maxY: Double)?
+        let root: Node?
         init(labels: [String], instance: Instance) {
             self.labels = labels
             self.instance = instance
+            rect = nil
+            root = nil
+        }
+        init(rect: (minX: Double, minY: Double, maxX: Double, maxY: Double), root: Node, instance: Instance) {
+            labels = []
+            self.instance = instance
+            self.rect = rect
+            self.root = root
+        }
+        var quad: [(Double, Double)]? {
+            guard let rect, let root else { return nil }
+            let p = [root.toParent(rect.minX, rect.minY), root.toParent(rect.maxX, rect.minY),
+                     root.toParent(rect.minX, rect.maxY), root.toParent(rect.maxX, rect.maxY)]
+            let lx = p.map { $0.0 }.min()!, hx = p.map { $0.0 }.max()!
+            let ly = p.map { $0.1 }.min()!, hy = p.map { $0.1 }.max()!
+            return [(lx, ly), (hx, ly), (lx, hy), (hx, hy)]
         }
     }
 
@@ -197,6 +217,7 @@ public final class EmoteRenderer: @unchecked Sendable {
             return normalized * end
         }
 
+        let base = parent
         func visit(_ layer: EmoteModel.Layer, parent: Node, clips: [Stencil], into out: inout [Item]) {
             let state = Self.state(layer, at: layerTime(layer))
             guard state != nil || layer.type == 2 else { return }
@@ -210,12 +231,13 @@ public final class EmoteRenderer: @unchecked Sendable {
             if icon == nil { bends = false }
             let node = Node(parent: parent, bends: bends)
             Self.place(node, content)
+            Self.inherit(node, content, mask: layer.inheritMask, parent: parent, base: base)
             if bends, let box = icon {
                 node.mesh = content.mesh
                 node.boxW = Double(max(1, box.width)); node.boxH = Double(max(1, box.height))
                 node.boxX = box.originX; node.boxY = box.originY
             }
-            node.opacity = parent.opacity * (state == nil ? 1 : content.opacity)
+            node.opacity = (layer.inheritMask & 0x400 != 0 ? parent : base).opacity * (state == nil ? 1 : content.opacity)
             node.z = parent.z + content.z
             if state != nil, layer.type == 1, layer.shape != nil { shapeSink?(layer, node) }
 
@@ -242,7 +264,24 @@ public final class EmoteRenderer: @unchecked Sendable {
             if layer.type == 12, state != nil, !layer.maskLabels.isEmpty {
                 childClips.append(Stencil(labels: layer.maskLabels, instance: instance))
             }
-            for child in layer.children { visit(child, parent: node, clips: childClips, into: &out) }
+            if layer.type == 7, state != nil {
+                var top = node
+                var corners = [(-16.0, -16.0), (16.0, -16.0), (-16.0, 16.0), (16.0, 16.0)]
+                while let up = top.parent {
+                    corners = corners.map { top.toParent($0.0, $0.1) }
+                    top = up
+                }
+                var rect = (minX: corners.map { $0.0 }.min()!, minY: corners.map { $0.1 }.min()!,
+                            maxX: corners.map { $0.0 }.max()!, maxY: corners.map { $0.1 }.max()!)
+                if let outer = clips.last(where: { $0.rect != nil })?.rect {
+                    rect = (max(rect.minX, outer.minX), max(rect.minY, outer.minY),
+                            min(rect.maxX, outer.maxX), min(rect.maxY, outer.maxY))
+                }
+                childClips.removeAll { $0.rect != nil }
+                childClips.append(Stencil(rect: rect, root: top, instance: instance))
+            }
+            let below = layer.inheritMask & 0x40_0000 != 0 ? parent : node
+            for child in layer.children { visit(child, parent: below, clips: childClips, into: &out) }
             // Only labels a stencil masks with need their subtree's items.
             if maskLabels.contains(layer.label), out.count > first {
                 instance.subtree[layer.label, default: []] += out[first...]
@@ -310,20 +349,56 @@ public final class EmoteRenderer: @unchecked Sendable {
     /// The frame's transform: flip, slant, zoom, then rotate (the models' `transformOrder`
     /// 0, 3, 2, 1), then move to `coord`.
     static func place(_ node: Node, _ c: EmoteModel.Content) {
-        var a = c.flipX ? -1.0 : 1.0, b = 0.0, cc = 0.0, d = c.flipY ? -1.0 : 1.0
-        if c.slantX != 0 || c.slantY != 0 {
-            let sx = tan(c.slantX * .pi / 180), sy = tan(c.slantY * .pi / 180)
-            b = sy * a; cc = sx * d
-        }
-        a *= c.scaleX; cc *= c.scaleX
-        b *= c.scaleY; d *= c.scaleY
-        if c.angle != 0 {
-            let r = c.angle * .pi / 180, cs = cos(r), sn = sin(r)
-            (a, b, cc, d) = (cs * a - sn * b, sn * a + cs * b, cs * cc - sn * d, sn * cc + cs * d)
-        }
+        let (a, b, cc, d) = linear(flipX: c.flipX, flipY: c.flipY, slantX: c.slantX, slantY: c.slantY,
+                                   scaleX: c.scaleX, scaleY: c.scaleY, angle: c.angle)
         node.a = a; node.b = b; node.c = cc; node.d = d
         node.tx = c.x - (a * c.ox + cc * c.oy)
         node.ty = c.y - (b * c.ox + d * c.oy)
+    }
+
+    static func linear(flipX: Bool, flipY: Bool, slantX: Double, slantY: Double, scaleX: Double, scaleY: Double,
+                       angle: Double) -> (Double, Double, Double, Double) {
+        var a = flipX ? -1.0 : 1.0, b = 0.0, cc = 0.0, d = flipY ? -1.0 : 1.0
+        if slantX != 0 || slantY != 0 {
+            let sx = tan(slantX * .pi / 180), sy = tan(slantY * .pi / 180)
+            b = sy * a; cc = sx * d
+        }
+        a *= scaleX; cc *= scaleX
+        b *= scaleY; d *= scaleY
+        if angle != 0 {
+            let r = angle * .pi / 180, cs = cos(r), sn = sin(r)
+            (a, b, cc, d) = (cs * a - sn * b, sn * a + cs * b, cs * cc - sn * d, sn * cc + cs * d)
+        }
+        return (a, b, cc, d)
+    }
+
+    static func inherit(_ node: Node, _ c: EmoteModel.Content, mask: Int, parent: Node, base: Node) {
+        let up = parent === base ? nil : parent
+        node.flipX = c.flipX != (mask & 0x4 != 0 && up?.flipX == true)
+        node.flipY = c.flipY != (mask & 0x8 != 0 && up?.flipY == true)
+        node.angle = c.angle + (mask & 0x10 != 0 ? up?.angle ?? 0 : 0)
+        node.scaleX = c.scaleX * (mask & 0x20 != 0 ? up?.scaleX ?? 1 : 1)
+        node.scaleY = c.scaleY * (mask & 0x40 != 0 ? up?.scaleY ?? 1 : 1)
+        node.slantX = c.slantX + (mask & 0x80 != 0 ? up?.slantX ?? 0 : 0)
+        node.slantY = c.slantY + (mask & 0x100 != 0 ? up?.slantY ?? 0 : 0)
+        guard mask & 0x1FC != 0x1FC, let up else { return }
+        let t = linear(flipX: node.flipX, flipY: node.flipY, slantX: node.slantX, slantY: node.slantY,
+                       scaleX: node.scaleX, scaleY: node.scaleY, angle: node.angle)
+        var l = (1.0, 0.0, 0.0, 1.0)
+        var k: Node? = up
+        while let n = k, n !== base {
+            l = (n.a * l.0 + n.c * l.1, n.b * l.0 + n.d * l.1, n.a * l.2 + n.c * l.3, n.b * l.2 + n.d * l.3)
+            k = n.parent
+        }
+        let det = l.0 * l.3 - l.2 * l.1
+        guard abs(det) > 1e-12 else { return }
+        let i = (l.3 / det, -l.1 / det, -l.2 / det, l.0 / det)
+        node.a = i.0 * t.0 + i.2 * t.1
+        node.b = i.1 * t.0 + i.3 * t.1
+        node.c = i.0 * t.2 + i.2 * t.3
+        node.d = i.1 * t.2 + i.3 * t.3
+        node.tx = c.x - (node.a * c.ox + node.c * c.oy)
+        node.ty = c.y - (node.b * c.ox + node.d * c.oy)
     }
 
     /// A bicubic Bézier patch (16 points, rows of four) at (u, v).
@@ -400,6 +475,29 @@ public final class EmoteRenderer: @unchecked Sendable {
         func maskBuffer(_ stencil: Stencil) -> [UInt8] {
             if let m = stencil.mask { return m }
             var m = [UInt8](repeating: 0, count: width * height)
+            if let q = stencil.quad {
+                let ring = [q[0], q[1], q[3], q[2]]
+                let lx = max(0, Int(saturating: (ring.map { $0.0 }.min()! - Double(x0)).rounded(.down)))
+                let hx = min(width - 1, Int(saturating: (ring.map { $0.0 }.max()! - Double(x0)).rounded(.up)))
+                let ly = max(0, Int(saturating: (ring.map { $0.1 }.min()! - Double(y0)).rounded(.down)))
+                let hy = min(height - 1, Int(saturating: (ring.map { $0.1 }.max()! - Double(y0)).rounded(.up)))
+                if lx <= hx, ly <= hy {
+                    for py in ly...hy {
+                        for px in lx...hx {
+                            let x = Double(px + x0) + 0.5, y = Double(py + y0) + 0.5
+                            var pos = false, neg = false
+                            for k in 0..<4 {
+                                let a = ring[k], b = ring[(k + 1) % 4]
+                                let cross = (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0)
+                                if cross > 0 { pos = true } else if cross < 0 { neg = true }
+                            }
+                            if !(pos && neg) { m[py * width + px] = 255 }
+                        }
+                    }
+                }
+                stencil.mask = m
+                return m
+            }
             for label in stencil.labels {
                 for item in stencil.instance.subtree[label] ?? [] {
                     Self.rasterize(texture: item.texture, icon: item.icon, points: grid(item), n: item.divisions,

@@ -20,6 +20,7 @@ public final class EmoteGPU: @unchecked Sendable {
     private let itemPipeline: MTLRenderPipelineState
     private let maskPipeline: MTLRenderPipelineState
     private let quadPipeline: MTLRenderPipelineState
+    private let solidPipeline: MTLRenderPipelineState
     private let premultiply: MTLComputePipelineState
     private let sampler: MTLSamplerState
     private let plainSampler: MTLSamplerState
@@ -54,11 +55,13 @@ public final class EmoteGPU: @unchecked Sendable {
         guard let item = pipeline("emoteVertex", "emoteFragment", format: pixelFormat),
               let mask = pipeline("emoteVertex", "emoteMaskFragment", format: .r8Unorm),
               let quad = pipeline("quadVertex", "quadFragment", format: pixelFormat),
+              let solid = pipeline("solidVertex", "solidFragment", format: .r8Unorm),
               let kernel = library.makeFunction(name: "premultiply"),
               let compute = try? device.makeComputePipelineState(function: kernel) else { return nil }
         itemPipeline = item
         maskPipeline = mask
         quadPipeline = quad
+        solidPipeline = solid
         premultiply = compute
         let s = MTLSamplerDescriptor()
         s.minFilter = .linear; s.magFilter = .linear
@@ -217,6 +220,16 @@ public final class EmoteGPU: @unchecked Sendable {
             pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { masks.append(nil); continue }
+            if var quad = stencil.quad, quad.count == 8 {
+                var view = SIMD4<Float>(x, y, Float(texture.width), Float(texture.height))
+                encoder.setRenderPipelineState(solidPipeline)
+                encoder.setVertexBytes(&quad, length: 32, index: 0)
+                encoder.setVertexBytes(&view, length: 16, index: 1)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                encoder.endEncoding()
+                masks.append((texture, x, y))
+                continue
+            }
             encoder.setRenderPipelineState(maskPipeline)
             encoder.setVertexBuffer(nodes, offset: 0, index: 1)
             encoder.setVertexBuffer(meshes, offset: 0, index: 2)
@@ -388,6 +401,18 @@ public final class EmoteGPU: @unchecked Sendable {
     }
 
     struct QOut { float4 position [[position]]; float2 uv; };
+    struct SOut { float4 position [[position]]; };
+
+    vertex SOut solidVertex(uint vid [[vertex_id]], constant float2 *p [[buffer(0)]], constant float4 &v [[buffer(1)]]) {
+        float2 q = p[vid] - v.xy;
+        SOut out;
+        out.position = float4(q.x / v.z * 2 - 1, 1 - q.y / v.w * 2, 0, 1);
+        return out;
+    }
+
+    fragment float4 solidFragment(SOut in [[stage_in]]) {
+        return float4(1);
+    }
 
     vertex QOut quadVertex(uint vid [[vertex_id]], constant float4 &r [[buffer(0)]], constant float4 &s [[buffer(1)]]) {
         float2 c = float2(vid & 1, vid >> 1);
