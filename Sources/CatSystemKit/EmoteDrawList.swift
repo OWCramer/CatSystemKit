@@ -40,6 +40,7 @@ public struct EmoteDrawList {
         public var items: [Item]
         /// The items' bounds in root coordinates, a little padded.
         public var minX: Float, minY: Float, maxX: Float, maxY: Float
+        public var quad: [Float]? = nil
     }
 
     public var nodes: [Node] = []
@@ -93,6 +94,14 @@ extension EmoteRenderer {
         func stencil(_ s: Stencil) -> Int {
             let key = ObjectIdentifier(s)
             if let hit = stencilIndex[key] { return hit }
+            if let q = s.quad {
+                let xs = q.map { Float($0.0) }, ys = q.map { Float($0.1) }
+                let i = list.stencils.count
+                list.stencils.append(.init(items: [], minX: xs.min()! - 1, minY: ys.min()! - 1, maxX: xs.max()! + 1, maxY: ys.max()! + 1,
+                                           quad: zip(xs, ys).flatMap { [$0.0, $0.1] }))
+                stencilIndex[key] = i
+                return i
+            }
             var maskItems: [EmoteDrawList.Item] = []
             var minX = Float.infinity, minY = Float.infinity, maxX = -Float.infinity, maxY = -Float.infinity
             for label in s.labels {

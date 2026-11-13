@@ -97,10 +97,12 @@ public final class EmoteModel {
         /// square about the layer's position, scaled and turned with it. Hit areas
         /// (`hit_head` ...) are these.
         public let shape: Int?
+        public let inheritMask: Int
 
         init(label: String, type: Int, parameterize: Int?, maskLabels: [String], meshDivision: Int, frames: [Frame],
-             children: [Layer], shape: Int? = nil) {
+             children: [Layer], shape: Int? = nil, inheritMask: Int = 0x1FC) {
             self.shape = shape
+            self.inheritMask = inheritMask
             self.label = label
             self.type = type
             self.parameterize = parameterize
@@ -298,7 +300,7 @@ public final class EmoteModel {
                      maskLabels: (value["stencilCompositeMaskLayerList"]?.list ?? []).compactMap(\.string),
                      meshDivision: value["meshDivision"]?.int ?? 16, frames: frames,
                      children: (value["children"]?.list ?? []).map(layer),
-                     shape: type == 1 ? value["shape"]?.int : nil)
+                     shape: type == 1 ? value["shape"]?.int : nil, inheritMask: value["inheritMask"]?.int ?? 0x1FC)
     }
 
     /// A frame's content, reading only what its `mask` says is there (as M2's player does).
